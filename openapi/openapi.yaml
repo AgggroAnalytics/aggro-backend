@@ -1,0 +1,613 @@
+openapi: 3.0.3
+info:
+  title: Aggro Backend API
+  description: |
+    HTTP API for the Aggro field analytics system. Most routes require JWT (Keycloak).
+    Field processing persistence runs as Temporal activity `finalize_field_processing_db` on queue
+    `aggro-backend` (Go worker in this repo), not via this HTTP API.
+  version: 1.0.0
+
+servers:
+  - url: http://localhost:8080
+    description: Local
+
+tags:
+  - name: Health
+  - name: Fields
+  - name: Seasons
+  - name: Organizations
+  - name: Tiles
+  - name: Storage
+
+paths:
+  /healthz:
+    get:
+      tags: [Health]
+      summary: Liveness/readiness
+      security: []
+      responses:
+        '200':
+          description: OK
+          content:
+            text/plain:
+              schema: { type: string, example: ok }
+
+  /fields:
+    get:
+      tags: [Fields]
+      summary: List fields by organization
+      parameters:
+        - name: organization_id
+          in: query
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [fields]
+                properties:
+                  fields:
+                    type: array
+                    items: { $ref: '#/components/schemas/FieldListItem' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '500': { $ref: '#/components/responses/ServerError' }
+    post:
+      tags: [Fields]
+      summary: Create field
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateFieldRequest' }
+      responses:
+        '201':
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/IdResponse' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '500': { $ref: '#/components/responses/ServerError' }
+
+  /fields/{id}:
+    parameters:
+      - $ref: '#/components/parameters/FieldId'
+    get:
+      tags: [Fields]
+      summary: Get field
+      responses:
+        '200':
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/FieldDetail' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    put:
+      tags: [Fields]
+      summary: Update field
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name: { type: string }
+                description: { type: string }
+      responses:
+        '200':
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/IdResponse' }
+    delete:
+      tags: [Fields]
+      summary: Delete field
+      responses:
+        '204': { description: No content }
+
+  /fields/{id}/tiles:
+    get:
+      tags: [Fields]
+      summary: Field tiles as GeoJSON FeatureCollection
+      parameters:
+        - $ref: '#/components/parameters/FieldId'
+      responses:
+        '200':
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/GeoJSONFeatureCollection' }
+
+  /fields/{id}/analytics:
+    get:
+      tags: [Fields]
+      summary: Field-level analytics timeseries and PMTiles artifacts
+      parameters:
+        - $ref: '#/components/parameters/FieldId'
+        - name: date_from
+          in: query
+          schema: { type: string, format: date-time }
+        - name: date_to
+          in: query
+          schema: { type: string, format: date-time }
+      responses:
+        '200':
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/FieldAnalyticsResponse' }
+
+  /fields/{id}/workflows:
+    get:
+      tags: [Fields]
+      summary: Field processing workflow runs (Temporal status + stage)
+      description: |
+        Lists `FieldProcessingWorkflow` executions for `workflow_id = field-{field_id}`.
+        Running workflows expose a coarse `stage` from pending activities (tiles → GEE → ML → PMTiles → DB).
+        Requires `TEMPORAL_ADDRESS` on the API server. Authenticated users must belong to the field's organization.
+      parameters:
+        - $ref: '#/components/parameters/FieldId'
+      responses:
+        '200':
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/FieldWorkflowsResponse' }
+        '403': { description: User not in field organization }
+        '503': { description: Temporal not configured on API }
+        '502': { description: Temporal query error }
+
+  /fields/{id}/analytics-jobs:
+    post:
+      tags: [Fields]
+      summary: Publish ML jobs to RabbitMQ (legacy path)
+      parameters:
+        - $ref: '#/components/parameters/FieldId'
+      responses:
+        '202':
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, example: accepted }
+                  tiles_total: { type: integer }
+                  tiles_with_ts: { type: integer }
+                  jobs_sent: { type: integer }
+        '503': { description: ML publisher not configured }
+
+  /fields/{id}/build-pmtiles:
+    post:
+      tags: [Fields]
+      summary: Trigger PMTiles build jobs (RabbitMQ)
+      parameters:
+        - $ref: '#/components/parameters/FieldId'
+      responses:
+        '202':
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string }
+                  jobs_sent: { type: integer }
+
+  /seasons:
+    get:
+      tags: [Seasons]
+      summary: List seasons for field
+      parameters:
+        - name: field_id
+          in: query
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  seasons:
+                    type: array
+                    items: { $ref: '#/components/schemas/Season' }
+    post:
+      tags: [Seasons]
+      summary: Create season
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [field_id, name, start_date, end_date]
+              properties:
+                field_id: { type: string, format: uuid }
+                name: { type: string }
+                start_date: { type: string, format: date }
+                end_date: { type: string, format: date }
+                is_auto: { type: boolean }
+      responses:
+        '201':
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/IdResponse' }
+
+  /seasons/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    get:
+      tags: [Seasons]
+      responses:
+        '200':
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Season' }
+    put:
+      tags: [Seasons]
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, start_date, end_date]
+              properties:
+                name: { type: string }
+                start_date: { type: string }
+                end_date: { type: string }
+                is_auto: { type: boolean }
+      responses:
+        '200':
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/IdResponse' }
+    delete:
+      tags: [Seasons]
+      responses:
+        '204': { description: No content }
+
+  /organizations:
+    get:
+      tags: [Organizations]
+      summary: Organizations for current user
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  organizations:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id: { type: string, format: uuid }
+                        name: { type: string }
+    post:
+      tags: [Organizations]
+      summary: Create organization
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name: { type: string }
+      responses:
+        '201':
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/IdResponse' }
+
+  /organizations/{id}/invite:
+    post:
+      tags: [Organizations]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email]
+              properties:
+                email: { type: string, format: email }
+                role:
+                  type: string
+                  enum: [admin, manager, farmer, viewer]
+      responses:
+        '201':
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  organization_id: { type: string }
+                  user_id: { type: string }
+                  role: { type: string }
+
+  /tiles/{id}/metrics:
+    get:
+      tags: [Tiles]
+      summary: Observed timeseries + tile predictions (tooltip)
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TileMetricsResponse' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '501': { description: Not configured }
+
+  /s3/{path}:
+    get:
+      tags: [Storage]
+      summary: Proxy S3/MinIO object (PMTiles; supports Range)
+      description: Path is everything after /s3/
+      parameters:
+        - name: path
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: Full object
+        '206':
+          description: Partial content
+        '502': { description: S3 error }
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: Keycloak access token
+
+  parameters:
+    FieldId:
+      name: id
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+
+  responses:
+    BadRequest:
+      description: Bad request
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorBody' }
+    Unauthorized:
+      description: Not authenticated
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorBody' }
+    NotFound:
+      description: Not found
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorBody' }
+    ServerError:
+      description: Server error
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorBody' }
+
+  schemas:
+    ErrorBody:
+      type: object
+      properties:
+        error: { type: string }
+
+    IdResponse:
+      type: object
+      required: [id]
+      properties:
+        id: { type: string, format: uuid }
+
+    FieldListItem:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        description: { type: string }
+        created_at: { type: string, format: date-time }
+        area_hectares: { type: number, nullable: true }
+        organization_id: { type: string, format: uuid }
+        coordinates:
+          type: array
+          description: Polygon rings [lon, lat], number[][][]
+          items:
+            type: array
+            items:
+              type: array
+              items: { type: number }
+
+    FieldDetail:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        description: { type: string }
+        coordinates:
+          type: array
+          description: Polygon rings [lon, lat]
+          items:
+            type: array
+            items:
+              type: array
+              items: { type: number }
+        organization_id: { type: string, format: uuid }
+        tile_count: { type: integer }
+        season_count: { type: integer }
+
+    CreateFieldRequest:
+      type: object
+      required: [name, coordinates, organization_id]
+      properties:
+        name: { type: string }
+        description: { type: string }
+        organization_id: { type: string, format: uuid }
+        coordinates:
+          type: array
+          description: Single polygon exterior + holes
+          items:
+            type: array
+            items:
+              type: array
+              items: { type: number }
+
+    GeoJSONFeatureCollection:
+      type: object
+      required: [type, features]
+      properties:
+        type: { const: FeatureCollection }
+        features:
+          type: array
+          items:
+            type: object
+            properties:
+              type: { const: Feature }
+              properties:
+                type: object
+                properties:
+                  tile_id: { type: string }
+              geometry: { type: object }
+
+    FieldWorkflowsResponse:
+      type: object
+      required: [field_id, workflow_id, workflow_type, runs, listing_note]
+      properties:
+        field_id: { type: string, format: uuid }
+        workflow_id: { type: string, description: Canonical id when starting workflow }
+        workflow_type: { type: string, example: FieldProcessingWorkflow }
+        runs:
+          type: array
+          items: { $ref: '#/components/schemas/FieldWorkflowRun' }
+        listing_note: { type: string }
+
+    FieldWorkflowRun:
+      type: object
+      properties:
+        workflow_id: { type: string }
+        run_id: { type: string }
+        status:
+          type: string
+          description: RUNNING, COMPLETED, FAILED, etc.
+        stage:
+          type: string
+          description: |
+            completed | failed | cut_tiles | geo_metrics | ml_analytics | parallel | finalize_db | …
+        stage_label: { type: string, description: Human-readable stage }
+        active_stages:
+          type: array
+          items: { type: string }
+          description: When parallel activities run (e.g. ML + observed PMTiles)
+        started_at: { type: string, format: date-time, nullable: true }
+        closed_at: { type: string, format: date-time, nullable: true }
+
+    FieldAnalyticsResponse:
+      type: object
+      properties:
+        field_id: { type: string, format: uuid }
+        analytics:
+          type: array
+          items: { $ref: '#/components/schemas/FieldAnalyticsRow' }
+        pmtiles:
+          type: array
+          items: { $ref: '#/components/schemas/PmtilesArtifact' }
+
+    FieldAnalyticsRow:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        field_id: { type: string, format: uuid }
+        observation_date: { type: string, format: date }
+        source: { type: string, description: "observed, derived, or predicted" }
+        tile_count: { type: integer, nullable: true }
+        valid_tile_count: { type: integer, nullable: true }
+        ndvi_mean: { type: number, nullable: true }
+        ndmi_mean: { type: number, nullable: true }
+        ndre_mean: { type: number, nullable: true }
+        valid_pixel_ratio_mean: { type: number, nullable: true }
+        stress_index_mean: { type: number, nullable: true }
+        temperature_c_mean: { type: number, nullable: true }
+        precipitation_mm_3d_mean: { type: number, nullable: true }
+        precipitation_mm_7d_mean: { type: number, nullable: true }
+        precipitation_mm_30d_mean: { type: number, nullable: true }
+        created_at: { type: string, format: date-time }
+
+    PmtilesArtifact:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        field_id: { type: string, format: uuid }
+        analysis_kind: { type: string, enum: [observed, prediction] }
+        analysis_date: { type: string, format: date }
+        module:
+          type: string
+          description: "empty for observed; else degradation, health_stress, irrigation_water_use, predicted"
+        pmtiles_url: { type: string }
+        created_at: { type: string, format: date-time }
+
+    Season:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        field_id: { type: string, format: uuid }
+        name: { type: string }
+        start_date: { type: string, format: date }
+        end_date: { type: string, format: date }
+        is_auto: { type: boolean }
+
+    TileMetricsResponse:
+      type: object
+      properties:
+        tile_id: { type: string, format: uuid }
+        observed:
+          type: array
+          items:
+            type: object
+            properties:
+              observation_date: { type: string, format: date-time }
+              ndvi: { type: number, nullable: true }
+              ndmi: { type: number, nullable: true }
+              ndre: { type: number, nullable: true }
+              valid_pixel_ratio: { type: number, nullable: true }
+              stress_index: { type: number, nullable: true }
+              temperature_c_mean: { type: number, nullable: true }
+              precipitation_mm_3d: { type: number, nullable: true }
+              precipitation_mm_7d: { type: number, nullable: true }
+              precipitation_mm_30d: { type: number, nullable: true }
+        predictions:
+          type: array
+          items:
+            type: object
+            properties:
+              id: { type: string, format: uuid }
+              module:
+                type: string
+                enum: [degradation, health_stress, irrigation_water_use]
+              prediction_date: { type: string, format: date-time }
+              status: { type: string }
+              degradation:
+                type: object
+                additionalProperties: true
+              health_stress:
+                type: object
+                additionalProperties: true
+              irrigation:
+                type: object
+                additionalProperties: true
+
+security:
+  - bearerAuth: []
