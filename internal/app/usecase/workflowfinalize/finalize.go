@@ -66,11 +66,12 @@ type DateURL struct {
 var ErrFieldNotFound = errors.New("field not found")
 
 type Result struct {
-	TilesWritten       int `json:"tiles_written"`
-	TimeseriesRows     int `json:"timeseries_rows"`
-	FieldAnalyticsDates int `json:"field_analytics_dates_updated"`
-	MLResultsApplied   int `json:"ml_results_applied"`
-	PmtilesUpserted    int `json:"pmtiles_artifacts_upserted"`
+	TilesWritten                  int `json:"tiles_written"`
+	TimeseriesRows                int `json:"timeseries_rows"`
+	FieldAnalyticsDates           int `json:"field_analytics_dates_updated"`
+	FieldPredictedAnalyticsDates  int `json:"field_predicted_analytics_dates_updated"`
+	MLResultsApplied              int `json:"ml_results_applied"`
+	PmtilesUpserted               int `json:"pmtiles_artifacts_upserted"`
 }
 
 type Deps struct {
@@ -169,6 +170,17 @@ func Apply(ctx context.Context, d Deps, req *FieldProcessingCompleteRequest) (*R
 					return fmt.Errorf("field analytics %s: %w", obsDate.Format("2006-01-02"), err)
 				}
 				res.FieldAnalyticsDates++
+			}
+		}
+
+		predMeans, mlUsable := AggregateMLResults(req.MLResults)
+		if mlUsable > 0 && d.FieldAnalyticsRepo != nil {
+			predMeans.TileCount = int32(mlUsable)
+			for obsDate := range datesSeen {
+				if err := d.FieldAnalyticsRepo.UpsertFieldPredictedAnalyticsForFieldAndDate(txCtx, fieldID, obsDate, predMeans); err != nil {
+					return fmt.Errorf("field predicted analytics %s: %w", obsDate.Format("2006-01-02"), err)
+				}
+				res.FieldPredictedAnalyticsDates++
 			}
 		}
 

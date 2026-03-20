@@ -5,6 +5,10 @@ SELECT id, field_id, observation_date, source,
   dry_days_mean, bare_soil_index_mean, valid_pixel_ratio_mean,
   temperature_c_mean, precipitation_mm_3d_mean, precipitation_mm_7d_mean, precipitation_mm_30d_mean,
   stress_index_mean, ndvi_stddev, ndmi_stddev, ndre_stddev,
+  heterogeneity_score,
+  prediction_degradation_score, prediction_vegetation_cover_loss_score, prediction_bare_soil_expansion_score,
+  prediction_health_score, prediction_stress_score_total, prediction_water_stress, prediction_confidence,
+  prediction_under_irrigation_risk_score, prediction_over_irrigation_risk_score, prediction_uniformity_score,
   created_at
 FROM field_analytics_timeseries
 WHERE field_id = sqlc.arg(field_id)
@@ -63,4 +67,47 @@ ON CONFLICT (field_id, observation_date, source) DO UPDATE SET
   ndvi_stddev = EXCLUDED.ndvi_stddev,
   ndmi_stddev = EXCLUDED.ndmi_stddev,
   ndre_stddev = EXCLUDED.ndre_stddev,
+  created_at = now();
+
+-- name: UpsertFieldPredictedAnalyticsForFieldAndDate :exec
+INSERT INTO field_analytics_timeseries (
+  id, field_id, observation_date, source,
+  tile_count,
+  heterogeneity_score,
+  prediction_degradation_score, prediction_vegetation_cover_loss_score, prediction_bare_soil_expansion_score,
+  prediction_health_score, prediction_stress_score_total, prediction_water_stress, prediction_confidence,
+  prediction_under_irrigation_risk_score, prediction_over_irrigation_risk_score, prediction_uniformity_score,
+  created_at
+) VALUES (
+  gen_random_uuid(),
+  sqlc.arg(field_id),
+  sqlc.arg(observation_date),
+  'predicted'::analytics_source,
+  sqlc.arg(tile_count),
+  sqlc.narg(heterogeneity_score),
+  sqlc.narg(prediction_degradation_score),
+  sqlc.narg(prediction_vegetation_cover_loss_score),
+  sqlc.narg(prediction_bare_soil_expansion_score),
+  sqlc.narg(prediction_health_score),
+  sqlc.narg(prediction_stress_score_total),
+  sqlc.narg(prediction_water_stress),
+  sqlc.narg(prediction_confidence),
+  sqlc.narg(prediction_under_irrigation_risk_score),
+  sqlc.narg(prediction_over_irrigation_risk_score),
+  sqlc.narg(prediction_uniformity_score),
+  now()
+)
+ON CONFLICT (field_id, observation_date, source) DO UPDATE SET
+  tile_count = EXCLUDED.tile_count,
+  heterogeneity_score = EXCLUDED.heterogeneity_score,
+  prediction_degradation_score = EXCLUDED.prediction_degradation_score,
+  prediction_vegetation_cover_loss_score = EXCLUDED.prediction_vegetation_cover_loss_score,
+  prediction_bare_soil_expansion_score = EXCLUDED.prediction_bare_soil_expansion_score,
+  prediction_health_score = EXCLUDED.prediction_health_score,
+  prediction_stress_score_total = EXCLUDED.prediction_stress_score_total,
+  prediction_water_stress = EXCLUDED.prediction_water_stress,
+  prediction_confidence = EXCLUDED.prediction_confidence,
+  prediction_under_irrigation_risk_score = EXCLUDED.prediction_under_irrigation_risk_score,
+  prediction_over_irrigation_risk_score = EXCLUDED.prediction_over_irrigation_risk_score,
+  prediction_uniformity_score = EXCLUDED.prediction_uniformity_score,
   created_at = now();

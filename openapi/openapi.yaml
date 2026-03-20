@@ -154,6 +154,107 @@ paths:
         '403': { description: User not in field organization }
         '503': { description: Temporal not configured on API }
         '502': { description: Temporal query error }
+    post:
+      tags: [Fields]
+      summary: Start field processing workflow (Temporal)
+      description: |
+        Starts `FieldProcessingWorkflow` with canonical `workflow_id = field-{field_id}`.
+        The workflow itself cuts tiles, computes metrics, runs ML and finalizes DB write.
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                from_date: { type: string, format: date }
+                to_date: { type: string, format: date }
+                year: { type: integer }
+                observation_dates:
+                  type: array
+                  items: { type: string, format: date }
+                ml_modules:
+                  type: array
+                  items: { type: string, enum: [m0, m1, m2] }
+      parameters:
+        - $ref: '#/components/parameters/FieldId'
+        - name: year
+          in: query
+          required: false
+          schema: { type: integer }
+      responses:
+        '202':
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, example: accepted }
+                  field_id: { type: string, format: uuid }
+                  workflow_id: { type: string }
+                  run_id: { type: string }
+                  workflow_type: { type: string, example: FieldProcessingWorkflow }
+        '403': { description: User not in field organization }
+        '503': { description: Temporal not configured on API }
+        '502': { description: Temporal start error }
+
+  /fields/{id}/processing-dates:
+    get:
+      tags: [Fields]
+      summary: Current season dates with processed flags
+      description: |
+        Returns all dates in current season and whether each date already has field analytics.
+        If no season covers today, the latest season is used.
+      parameters:
+        - $ref: '#/components/parameters/FieldId'
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  field_id: { type: string, format: uuid }
+                  season_id: { type: string, format: uuid }
+                  season_name: { type: string }
+                  season_start: { type: string, format: date }
+                  season_end: { type: string, format: date }
+                  processing_dates:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        date: { type: string, format: date }
+                        processed: { type: boolean }
+
+  /fields/{id}/results/delete:
+    post:
+      tags: [Fields]
+      summary: Delete processed results for selected dates
+      parameters:
+        - $ref: '#/components/parameters/FieldId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [dates]
+              properties:
+                dates:
+                  type: array
+                  items: { type: string, format: date }
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string }
+                  dates:
+                    type: array
+                    items: { type: string, format: date }
 
   /fields/{id}/analytics-jobs:
     post:
@@ -538,12 +639,27 @@ components:
         ndvi_mean: { type: number, nullable: true }
         ndmi_mean: { type: number, nullable: true }
         ndre_mean: { type: number, nullable: true }
+        gndvi_mean: { type: number, nullable: true }
+        msavi_mean: { type: number, nullable: true }
+        nbr2_mean: { type: number, nullable: true }
+        bare_soil_index_mean: { type: number, nullable: true }
         valid_pixel_ratio_mean: { type: number, nullable: true }
         stress_index_mean: { type: number, nullable: true }
         temperature_c_mean: { type: number, nullable: true }
         precipitation_mm_3d_mean: { type: number, nullable: true }
         precipitation_mm_7d_mean: { type: number, nullable: true }
         precipitation_mm_30d_mean: { type: number, nullable: true }
+        heterogeneity_score: { type: number, nullable: true, description: "Degradation heterogeneity (predicted rows)" }
+        prediction_degradation_score: { type: number, nullable: true }
+        prediction_vegetation_cover_loss_score: { type: number, nullable: true }
+        prediction_bare_soil_expansion_score: { type: number, nullable: true }
+        prediction_health_score: { type: number, nullable: true }
+        prediction_stress_score_total: { type: number, nullable: true }
+        prediction_water_stress: { type: number, nullable: true }
+        prediction_confidence: { type: number, nullable: true }
+        prediction_under_irrigation_risk_score: { type: number, nullable: true }
+        prediction_over_irrigation_risk_score: { type: number, nullable: true }
+        prediction_uniformity_score: { type: number, nullable: true }
         created_at: { type: string, format: date-time }
 
     PmtilesArtifact:

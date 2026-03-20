@@ -15,6 +15,21 @@ type AnalysisPmtilesPostgres struct {
 	pool *pgxpool.Pool
 }
 
+func (r *AnalysisPmtilesPostgres) DeleteArtifactsByDates(ctx context.Context, fieldID uuid.UUID, dates []time.Time) error {
+	for _, d := range dates {
+		day := d.UTC().Truncate(24 * time.Hour)
+		if _, err := r.pool.Exec(
+			ctx,
+			`DELETE FROM analysis_pmtiles_artifacts WHERE field_id = $1 AND analysis_date = $2::date`,
+			fieldID,
+			day,
+		); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func NewAnalysisPmtilesPostgres(pool *pgxpool.Pool) *AnalysisPmtilesPostgres {
 	return &AnalysisPmtilesPostgres{pool: pool}
 }

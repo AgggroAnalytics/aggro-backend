@@ -215,6 +215,17 @@ CREATE TABLE IF NOT EXISTS field_analytics_timeseries (
   ndre_stddev NUMERIC,
   heterogeneity_score NUMERIC,
 
+  prediction_degradation_score NUMERIC,
+  prediction_vegetation_cover_loss_score NUMERIC,
+  prediction_bare_soil_expansion_score NUMERIC,
+  prediction_health_score NUMERIC,
+  prediction_stress_score_total NUMERIC,
+  prediction_water_stress NUMERIC,
+  prediction_confidence NUMERIC,
+  prediction_under_irrigation_risk_score NUMERIC,
+  prediction_over_irrigation_risk_score NUMERIC,
+  prediction_uniformity_score NUMERIC,
+
   created_at timestamptz NOT NULL DEFAULT now(),
 
   CONSTRAINT field_analytics_unique UNIQUE (field_id, observation_date, source),

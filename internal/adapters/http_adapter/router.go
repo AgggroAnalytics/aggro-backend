@@ -3,10 +3,13 @@ package httpadapter
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
+	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -14,12 +17,14 @@ import (
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 
+	"github.com/AgggroAnalytics/aggro-backend/internal/adapters/temporalworkflows"
 	"github.com/AgggroAnalytics/aggro-backend/internal/app/domain"
 	"github.com/AgggroAnalytics/aggro-backend/internal/app/ports"
-	apispec "github.com/AgggroAnalytics/aggro-backend/openapi"
 	fieldusecase "github.com/AgggroAnalytics/aggro-backend/internal/app/usecase/field"
-	"github.com/AgggroAnalytics/aggro-backend/internal/adapters/temporalworkflows"
+	apispec "github.com/AgggroAnalytics/aggro-backend/openapi"
 	"github.com/google/uuid"
+	enumspb "go.temporal.io/api/enums/v1"
+	"go.temporal.io/sdk/client"
 )
 
 // RouterDeps holds dependencies for HTTP handlers.
@@ -36,10 +41,14 @@ type RouterDeps struct {
 	TileMetricsReader  ports.TileMetricsReader
 	TileTsRepo         ports.TileTimeseriesRepository
 	MLPublisher        MLPublisher
-	S3Client *s3.Client
-	S3Bucket string
+	S3Client           *s3.Client
+	S3Bucket           string
 	// TemporalFieldWorkflows lists FieldProcessingWorkflow runs (optional).
 	TemporalFieldWorkflows *temporalworkflows.Lister
+	TemporalClient         client.Client
+	TemporalNamespace      string
+	TemporalTaskQueue      string
+	TemporalBackendQueue   string
 }
 
 func NewRouter(d *RouterDeps) http.Handler {
@@ -69,6 +78,9 @@ func NewRouter(d *RouterDeps) http.Handler {
 	mux.HandleFunc("DELETE /fields/{id}", h.deleteField)
 	mux.HandleFunc("GET /fields/{id}/analytics", h.getFieldAnalytics)
 	mux.HandleFunc("GET /fields/{id}/workflows", h.listFieldWorkflows)
+	mux.HandleFunc("POST /fields/{id}/workflows", h.startFieldWorkflow)
+	mux.HandleFunc("GET /fields/{id}/processing-dates", h.getFieldProcessingDates)
+	mux.HandleFunc("POST /fields/{id}/results/delete", h.deleteFieldResultsByDates)
 	mux.HandleFunc("GET /fields/{id}/tiles", h.getFieldTiles)
 	mux.HandleFunc("POST /fields/{id}/analytics-jobs", h.postFieldAnalyticsJobs)
 	mux.HandleFunc("POST /fields/{id}/build-pmtiles", h.postBuildPmtiles)
@@ -105,14 +117,23 @@ func (h *handlers) proxyS3(w http.ResponseWriter, r *http.Request) {
 		h.writeErr(w, http.StatusServiceUnavailable, "S3 not configured")
 		return
 	}
+	bucket := h.d.S3Bucket
 	input := &s3.GetObjectInput{
-		Bucket: aws.String(h.d.S3Bucket),
+		Bucket: aws.String(bucket),
 		Key:    aws.String(key),
 	}
 	if rng := r.Header.Get("Range"); rng != "" {
 		input.Range = aws.String(rng)
 	}
 	out, err := h.d.S3Client.GetObject(r.Context(), input)
+	if err != nil && strings.Contains(err.Error(), "NoSuchBucket") {
+		parts := strings.SplitN(key, "/", 2)
+		if len(parts) == 2 && parts[0] != "" && parts[1] != "" {
+			input.Bucket = aws.String(parts[0])
+			input.Key = aws.String(parts[1])
+			out, err = h.d.S3Client.GetObject(r.Context(), input)
+		}
+	}
 	if err != nil {
 		slog.Warn("s3 GetObject failed", "key", key, "err", err)
 		h.writeErr(w, http.StatusBadGateway, "s3: "+err.Error())
@@ -151,7 +172,6 @@ func NewS3Client(endpoint, accessKey, secretKey, region string) *s3.Client {
 		UsePathStyle: true,
 	})
 }
-
 
 type handlers struct {
 	d *RouterDeps
@@ -214,12 +234,12 @@ func (h *handlers) listFields(w http.ResponseWriter, r *http.Request) {
 }
 
 type fieldListItemJSON struct {
-	ID             string      `json:"id"`
-	Name           string      `json:"name"`
-	Description    string      `json:"description"`
-	CreatedAt      string      `json:"created_at"`
-	AreaHectares   *float64    `json:"area_hectares,omitempty"`
-	OrganizationID string      `json:"organization_id"`
+	ID             string        `json:"id"`
+	Name           string        `json:"name"`
+	Description    string        `json:"description"`
+	CreatedAt      string        `json:"created_at"`
+	AreaHectares   *float64      `json:"area_hectares,omitempty"`
+	OrganizationID string        `json:"organization_id"`
 	Coordinates    [][][]float64 `json:"coordinates"`
 }
 
@@ -318,6 +338,343 @@ func (h *handlers) listFieldWorkflows(w http.ResponseWriter, r *http.Request) {
 		"workflow_type": temporalworkflows.WorkflowTypeFieldProcessing,
 		"runs":          runs,
 		"listing_note":  "Executions are listed when workflow_id matches field-{field_id} (see run_field_workflow.py).",
+	})
+}
+
+// POST /fields/{id}/workflows — start FieldProcessingWorkflow in Temporal.
+func (h *handlers) startFieldWorkflow(w http.ResponseWriter, r *http.Request) {
+	id, ok := h.pathUUID(r, "id")
+	if !ok {
+		h.writeErr(w, http.StatusBadRequest, "invalid field id")
+		return
+	}
+	if h.d.TemporalClient == nil {
+		h.writeErr(w, http.StatusServiceUnavailable, "workflow start not configured (set TEMPORAL_ADDRESS)")
+		return
+	}
+
+	field, err := h.d.FieldRepo.GetFieldByID(r.Context(), id)
+	if err != nil {
+		h.writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if field == nil {
+		h.writeErr(w, http.StatusNotFound, "field not found")
+		return
+	}
+
+	if sub := SubjectFromContext(r.Context()); sub != "" {
+		userID, perr := uuid.Parse(sub)
+		if perr != nil {
+			h.writeErr(w, http.StatusBadRequest, "invalid user")
+			return
+		}
+		orgs, oerr := h.d.OrganizationRepo.ListForUser(r.Context(), userID)
+		if oerr != nil {
+			h.writeErr(w, http.StatusInternalServerError, oerr.Error())
+			return
+		}
+		member := false
+		for _, o := range orgs {
+			if o.ID == field.OrganizationID {
+				member = true
+				break
+			}
+		}
+		if !member {
+			h.writeErr(w, http.StatusForbidden, "access denied")
+			return
+		}
+	}
+
+	const dateLayout = "2006-01-02"
+	fromDate, toDate, modules, err := h.resolveWorkflowDateRangeAndModules(r.Context(), field.ID, r.Body)
+	if err != nil {
+		h.writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	requestPayload := map[string]any{
+		"field_id":           id.String(),
+		"field_geom":         map[string]any{"type": "Polygon", "coordinates": domainPolygonToRings(field.Coordinates)},
+		"tile_size_m":        24,
+		"min_coverage_ratio": 0,
+		"include_tile_geom":  true,
+		"from_date":          fromDate,
+		"to_date":            toDate,
+		"ml_modules":         modules,
+	}
+	if h.d.TemporalBackendQueue != "" {
+		requestPayload["backend_finalize_task_queue"] = h.d.TemporalBackendQueue
+	}
+
+	opts := client.StartWorkflowOptions{
+		ID:                    temporalworkflows.FieldWorkflowID(id),
+		TaskQueue:             h.d.TemporalTaskQueue,
+		WorkflowIDReusePolicy: enumspb.WORKFLOW_ID_REUSE_POLICY_ALLOW_DUPLICATE,
+	}
+	run, err := h.d.TemporalClient.ExecuteWorkflow(r.Context(), opts, temporalworkflows.WorkflowTypeFieldProcessing, requestPayload)
+	if err != nil {
+		h.writeErr(w, http.StatusBadGateway, "temporal start failed: "+err.Error())
+		return
+	}
+
+	h.writeJSON(w, http.StatusAccepted, map[string]any{
+		"status":        "accepted",
+		"field_id":      id.String(),
+		"workflow_id":   opts.ID,
+		"run_id":        run.GetRunID(),
+		"workflow_type": temporalworkflows.WorkflowTypeFieldProcessing,
+	})
+}
+
+func (h *handlers) getFieldProcessingDates(w http.ResponseWriter, r *http.Request) {
+	fieldID, ok := h.pathUUID(r, "id")
+	if !ok {
+		h.writeErr(w, http.StatusBadRequest, "invalid field id")
+		return
+	}
+
+	now := time.Now().UTC()
+	year := now.Year()
+	if yearRaw := r.URL.Query().Get("year"); yearRaw != "" {
+		parsedYear, perr := strconv.Atoi(yearRaw)
+		if perr != nil {
+			h.writeErr(w, http.StatusBadRequest, "invalid year")
+			return
+		}
+		year = parsedYear
+	}
+	yearStart := time.Date(year, time.January, 1, 0, 0, 0, 0, time.UTC)
+	yearEnd := time.Date(year, time.December, 31, 0, 0, 0, 0, time.UTC)
+	if year == now.Year() {
+		yearEnd = now
+	}
+	analytics, err := h.d.FieldAnalyticsRepo.ListFieldAnalyticsByFieldID(r.Context(), fieldID, &yearStart, &yearEnd)
+	if err != nil {
+		h.writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	processedSet := make(map[string]struct{}, len(analytics))
+	for _, row := range analytics {
+		key := row.ObservationDate.UTC().Format("2006-01-02")
+		processedSet[key] = struct{}{}
+	}
+
+	type processingDateItem struct {
+		Date      string `json:"date"`
+		Processed bool   `json:"processed"`
+	}
+	items := make([]processingDateItem, 0)
+	for _, d := range buildProcessingDatesForYear(year, yearEnd) {
+		key := d
+		_, processed := processedSet[key]
+		items = append(items, processingDateItem{Date: key, Processed: processed})
+	}
+
+	h.writeJSON(w, http.StatusOK, map[string]any{
+		"field_id":         fieldID.String(),
+		"year":             year,
+		"year_start":       yearStart.Format("2006-01-02"),
+		"year_end":         yearEnd.Format("2006-01-02"),
+		"processing_dates": items,
+	})
+}
+
+func (h *handlers) pickCurrentSeason(ctx context.Context, fieldID uuid.UUID) (*domain.Season, error) {
+	seasons, err := h.d.SeasonRepo.ListSeasonsByFieldID(ctx, fieldID)
+	if err != nil {
+		return nil, err
+	}
+	if len(seasons) == 0 {
+		return nil, errors.New("no seasons for field")
+	}
+	sort.Slice(seasons, func(i, j int) bool {
+		return seasons[i].StartDate.Before(seasons[j].StartDate)
+	})
+
+	now := time.Now().UTC()
+	for i := range seasons {
+		s := &seasons[i]
+		start := s.StartDate.UTC().Truncate(24 * time.Hour)
+		end := s.EndDate.UTC().Truncate(24 * time.Hour)
+		if !now.Before(start) && !now.After(end) {
+			return s, nil
+		}
+	}
+	return &seasons[len(seasons)-1], nil
+}
+
+func (h *handlers) resolveWorkflowDateRangeAndModules(ctx context.Context, fieldID uuid.UUID, body io.Reader) (fromDate, toDate string, modules []string, err error) {
+	type startWorkflowRequest struct {
+		Year             *int     `json:"year"`
+		FromDate         string   `json:"from_date"`
+		ToDate           string   `json:"to_date"`
+		ObservationDates []string `json:"observation_dates"`
+		MlModules        []string `json:"ml_modules"`
+	}
+	req := startWorkflowRequest{}
+	if body != nil {
+		_ = json.NewDecoder(body).Decode(&req)
+	}
+
+	modules = req.MlModules
+	if len(modules) == 0 {
+		modules = []string{"m0", "m1", "m2"}
+	}
+
+	if len(req.ObservationDates) > 0 {
+		sorted := append([]string(nil), req.ObservationDates...)
+		sort.Strings(sorted)
+		fromDate = sorted[0]
+		toDate = sorted[len(sorted)-1]
+	} else if req.FromDate != "" || req.ToDate != "" {
+		fromDate = req.FromDate
+		toDate = req.ToDate
+	}
+
+	now := time.Now().UTC()
+	selectedYear := now.Year()
+	if req.Year != nil {
+		selectedYear = *req.Year
+	}
+	yearStart := time.Date(selectedYear, time.January, 1, 0, 0, 0, 0, time.UTC)
+	yearEnd := time.Date(selectedYear, time.December, 31, 0, 0, 0, 0, time.UTC)
+	if selectedYear == now.Year() {
+		yearEnd = now
+	}
+	analytics, aerr := h.d.FieldAnalyticsRepo.ListFieldAnalyticsByFieldID(ctx, fieldID, &yearStart, &yearEnd)
+	if aerr != nil {
+		return "", "", nil, aerr
+	}
+	processedSet := make(map[string]struct{}, len(analytics))
+	for _, row := range analytics {
+		processedSet[row.ObservationDate.UTC().Format("2006-01-02")] = struct{}{}
+	}
+	allowedDates := buildProcessingDatesForYear(selectedYear, yearEnd)
+	allowedSet := make(map[string]struct{}, len(allowedDates))
+	for _, d := range allowedDates {
+		allowedSet[d] = struct{}{}
+	}
+
+	var selectedDates []string
+	if len(req.ObservationDates) > 0 {
+		selectedDates = append(selectedDates, req.ObservationDates...)
+	} else if req.FromDate != "" || req.ToDate != "" {
+		const layout = "2006-01-02"
+		start, ferr := time.Parse(layout, req.FromDate)
+		if ferr != nil {
+			return "", "", nil, errors.New("invalid from_date, expected YYYY-MM-DD")
+		}
+		end, terr := time.Parse(layout, req.ToDate)
+		if terr != nil {
+			return "", "", nil, errors.New("invalid to_date, expected YYYY-MM-DD")
+		}
+		if start.After(end) {
+			return "", "", nil, errors.New("from_date must be <= to_date")
+		}
+		for _, d := range allowedDates {
+			dd, _ := time.Parse(layout, d)
+			if !dd.Before(start) && !dd.After(end) {
+				selectedDates = append(selectedDates, d)
+			}
+		}
+	} else {
+		for _, d := range allowedDates {
+			if _, processed := processedSet[d]; !processed {
+				selectedDates = append(selectedDates, d)
+			}
+		}
+	}
+
+	if len(selectedDates) == 0 {
+		return "", "", nil, errors.New("no unprocessed dates to run in current year")
+	}
+	for _, d := range selectedDates {
+		if _, ok := allowedSet[d]; !ok {
+			return "", "", nil, errors.New("selected dates are outside allowed schedule")
+		}
+		if _, processed := processedSet[d]; processed {
+			return "", "", nil, errors.New("selected range includes already processed dates")
+		}
+	}
+	sort.Strings(selectedDates)
+	fromDate = selectedDates[0]
+	toDate = selectedDates[len(selectedDates)-1]
+
+	const layout = "2006-01-02"
+	fromParsed, ferr := time.Parse(layout, fromDate)
+	if ferr != nil {
+		return "", "", nil, errors.New("invalid from_date, expected YYYY-MM-DD")
+	}
+	toParsed, terr := time.Parse(layout, toDate)
+	if terr != nil {
+		return "", "", nil, errors.New("invalid to_date, expected YYYY-MM-DD")
+	}
+	if fromParsed.After(toParsed) {
+		return "", "", nil, errors.New("from_date must be <= to_date")
+	}
+	return fromDate, toDate, modules, nil
+}
+
+func buildProcessingDatesForYear(year int, until time.Time) []string {
+	anchors := []int{1, 8, 16, 24}
+	var out []string
+	for month := time.January; month <= time.December; month++ {
+		for _, day := range anchors {
+			d := time.Date(year, month, day, 0, 0, 0, 0, time.UTC)
+			if d.Year() != year {
+				continue
+			}
+			if d.After(until) {
+				continue
+			}
+			out = append(out, d.Format("2006-01-02"))
+		}
+	}
+	return out
+}
+
+func (h *handlers) deleteFieldResultsByDates(w http.ResponseWriter, r *http.Request) {
+	fieldID, ok := h.pathUUID(r, "id")
+	if !ok {
+		h.writeErr(w, http.StatusBadRequest, "invalid field id")
+		return
+	}
+	var req struct {
+		Dates []string `json:"dates"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		h.writeErr(w, http.StatusBadRequest, "invalid body")
+		return
+	}
+	if len(req.Dates) == 0 {
+		h.writeErr(w, http.StatusBadRequest, "dates are required")
+		return
+	}
+	const layout = "2006-01-02"
+	parsed := make([]time.Time, 0, len(req.Dates))
+	for _, dateRaw := range req.Dates {
+		d, err := time.Parse(layout, dateRaw)
+		if err != nil {
+			h.writeErr(w, http.StatusBadRequest, "invalid date format, expected YYYY-MM-DD")
+			return
+		}
+		parsed = append(parsed, d)
+	}
+
+	if err := h.d.FieldAnalyticsRepo.DeleteFieldAnalyticsByDates(r.Context(), fieldID, parsed); err != nil {
+		h.writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if err := h.d.PmtilesRepo.DeleteArtifactsByDates(r.Context(), fieldID, parsed); err != nil {
+		h.writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	h.writeJSON(w, http.StatusOK, map[string]any{
+		"status": "deleted",
+		"dates":  req.Dates,
 	})
 }
 
@@ -445,51 +802,81 @@ func (h *handlers) getFieldAnalytics(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 	h.writeJSON(w, http.StatusOK, map[string]any{
-		"field_id":   id.String(),
-		"analytics":  analytics,
-		"pmtiles":    artifacts,
+		"field_id":  id.String(),
+		"analytics": analytics,
+		"pmtiles":   artifacts,
 	})
 }
 
 func fieldAnalyticsRowToJSON(row ports.FieldAnalyticsRow) fieldAnalyticsRowJSON {
 	j := fieldAnalyticsRowJSON{
-		ID:              row.ID.String(),
-		FieldID:         row.FieldID.String(),
-		ObservationDate: row.ObservationDate.Format("2006-01-02"),
-		Source:          row.Source,
-		TileCount:       row.TileCount,
-		ValidTileCount:  row.ValidTileCount,
-		NdviMean:        row.NdviMean,
-		NdmiMean:        row.NdmiMean,
-		NdreMean:        row.NdreMean,
-		ValidPixelRatioMean: row.ValidPixelRatioMean,
-		StressIndexMean: row.StressIndexMean,
-		TemperatureCMean: row.TemperatureCMean,
-		PrecipitationMm3dMean: row.PrecipitationMm3dMean,
-		PrecipitationMm7dMean: row.PrecipitationMm7dMean,
-		PrecipitationMm30dMean: row.PrecipitationMm30dMean,
-		CreatedAt: row.CreatedAt.Format(time.RFC3339),
+		ID:                                 row.ID.String(),
+		FieldID:                            row.FieldID.String(),
+		ObservationDate:                    row.ObservationDate.Format("2006-01-02"),
+		Source:                             row.Source,
+		TileCount:                          row.TileCount,
+		ValidTileCount:                     row.ValidTileCount,
+		NdviMean:                           row.NdviMean,
+		NdmiMean:                           row.NdmiMean,
+		NdreMean:                           row.NdreMean,
+		GndviMean:                          row.GndviMean,
+		MsaviMean:                          row.MsaviMean,
+		Nbr2Mean:                           row.Nbr2Mean,
+		BareSoilIndexMean:                  row.BareSoilIndexMean,
+		ValidPixelRatioMean:                row.ValidPixelRatioMean,
+		StressIndexMean:                    row.StressIndexMean,
+		TemperatureCMean:                   row.TemperatureCMean,
+		PrecipitationMm3dMean:              row.PrecipitationMm3dMean,
+		PrecipitationMm7dMean:              row.PrecipitationMm7dMean,
+		PrecipitationMm30dMean:             row.PrecipitationMm30dMean,
+		HeterogeneityScore:                 row.HeterogeneityScore,
+		PredictionDegradationScore:         row.PredictionDegradationScore,
+		PredictionVegetationCoverLossScore: row.PredictionVegetationCoverLossScore,
+		PredictionBareSoilExpansionScore:   row.PredictionBareSoilExpansionScore,
+		PredictionHealthScore:              row.PredictionHealthScore,
+		PredictionStressScoreTotal:         row.PredictionStressScoreTotal,
+		PredictionWaterStress:              row.PredictionWaterStress,
+		PredictionConfidence:               row.PredictionConfidence,
+		PredictionUnderIrrigationRiskScore: row.PredictionUnderIrrigationRiskScore,
+		PredictionOverIrrigationRiskScore:  row.PredictionOverIrrigationRiskScore,
+		PredictionUniformityScore:          row.PredictionUniformityScore,
+		CreatedAt:                          row.CreatedAt.Format(time.RFC3339),
 	}
 	return j
 }
 
 type fieldAnalyticsRowJSON struct {
-	ID                     string   `json:"id"`
-	FieldID                string   `json:"field_id"`
-	ObservationDate        string   `json:"observation_date"`
-	Source                 string   `json:"source"`
-	TileCount              *int32   `json:"tile_count,omitempty"`
-	ValidTileCount         *int32   `json:"valid_tile_count,omitempty"`
-	NdviMean               *float64 `json:"ndvi_mean,omitempty"`
-	NdmiMean               *float64 `json:"ndmi_mean,omitempty"`
-	NdreMean               *float64 `json:"ndre_mean,omitempty"`
-	ValidPixelRatioMean    *float64 `json:"valid_pixel_ratio_mean,omitempty"`
-	StressIndexMean        *float64 `json:"stress_index_mean,omitempty"`
-	TemperatureCMean       *float64 `json:"temperature_c_mean,omitempty"`
-	PrecipitationMm3dMean  *float64 `json:"precipitation_mm_3d_mean,omitempty"`
-	PrecipitationMm7dMean  *float64 `json:"precipitation_mm_7d_mean,omitempty"`
-	PrecipitationMm30dMean *float64 `json:"precipitation_mm_30d_mean,omitempty"`
-	CreatedAt              string   `json:"created_at"`
+	ID                                 string   `json:"id"`
+	FieldID                            string   `json:"field_id"`
+	ObservationDate                    string   `json:"observation_date"`
+	Source                             string   `json:"source"`
+	TileCount                          *int32   `json:"tile_count,omitempty"`
+	ValidTileCount                     *int32   `json:"valid_tile_count,omitempty"`
+	NdviMean                           *float64 `json:"ndvi_mean,omitempty"`
+	NdmiMean                           *float64 `json:"ndmi_mean,omitempty"`
+	NdreMean                           *float64 `json:"ndre_mean,omitempty"`
+	GndviMean                          *float64 `json:"gndvi_mean,omitempty"`
+	MsaviMean                          *float64 `json:"msavi_mean,omitempty"`
+	Nbr2Mean                           *float64 `json:"nbr2_mean,omitempty"`
+	BareSoilIndexMean                  *float64 `json:"bare_soil_index_mean,omitempty"`
+	ValidPixelRatioMean                *float64 `json:"valid_pixel_ratio_mean,omitempty"`
+	StressIndexMean                    *float64 `json:"stress_index_mean,omitempty"`
+	TemperatureCMean                   *float64 `json:"temperature_c_mean,omitempty"`
+	PrecipitationMm3dMean              *float64 `json:"precipitation_mm_3d_mean,omitempty"`
+	PrecipitationMm7dMean              *float64 `json:"precipitation_mm_7d_mean,omitempty"`
+	PrecipitationMm30dMean             *float64 `json:"precipitation_mm_30d_mean,omitempty"`
+	HeterogeneityScore                 *float64 `json:"heterogeneity_score,omitempty"`
+	PredictionDegradationScore         *float64 `json:"prediction_degradation_score,omitempty"`
+	PredictionVegetationCoverLossScore *float64 `json:"prediction_vegetation_cover_loss_score,omitempty"`
+	PredictionBareSoilExpansionScore   *float64 `json:"prediction_bare_soil_expansion_score,omitempty"`
+	PredictionHealthScore              *float64 `json:"prediction_health_score,omitempty"`
+	PredictionStressScoreTotal         *float64 `json:"prediction_stress_score_total,omitempty"`
+	PredictionWaterStress              *float64 `json:"prediction_water_stress,omitempty"`
+	PredictionConfidence               *float64 `json:"prediction_confidence,omitempty"`
+	PredictionUnderIrrigationRiskScore *float64 `json:"prediction_under_irrigation_risk_score,omitempty"`
+	PredictionOverIrrigationRiskScore  *float64 `json:"prediction_over_irrigation_risk_score,omitempty"`
+	PredictionUniformityScore          *float64 `json:"prediction_uniformity_score,omitempty"`
+	CreatedAt                          string   `json:"created_at"`
 }
 
 type pmtilesArtifactJSON struct {
@@ -554,21 +941,51 @@ func (h *handlers) postFieldAnalyticsJobs(w http.ResponseWriter, r *http.Request
 			entry := map[string]interface{}{
 				"date": row.ObservationDate.Format("2006-01-02"),
 			}
-			if row.Ndvi != nil { entry["ndvi"] = *row.Ndvi }
-			if row.Ndmi != nil { entry["ndmi"] = *row.Ndmi }
-			if row.Ndre != nil { entry["ndre"] = *row.Ndre }
-			if row.Gndvi != nil { entry["gndvi"] = *row.Gndvi }
-			if row.Msavi != nil { entry["msavi"] = *row.Msavi }
-			if row.Vv != nil { entry["vv"] = *row.Vv }
-			if row.Vh != nil { entry["vh"] = *row.Vh }
-			if row.Nbr2 != nil { entry["nbr2"] = *row.Nbr2 }
-			if row.BareSoilIndex != nil { entry["bare_soil_index"] = *row.BareSoilIndex }
-			if row.ValidPixelRatio != nil { entry["valid_pixel_ratio"] = *row.ValidPixelRatio }
-			if row.DryDays != nil { entry["dry_days"] = *row.DryDays }
-			if row.TemperatureCMean != nil { entry["temperature_c_mean"] = *row.TemperatureCMean }
-			if row.PrecipitationMm3d != nil { entry["precipitation_mm_3d"] = *row.PrecipitationMm3d }
-			if row.PrecipitationMm7d != nil { entry["precipitation_mm_7d"] = *row.PrecipitationMm7d }
-			if row.PrecipitationMm30d != nil { entry["precipitation_mm_30d"] = *row.PrecipitationMm30d }
+			if row.Ndvi != nil {
+				entry["ndvi"] = *row.Ndvi
+			}
+			if row.Ndmi != nil {
+				entry["ndmi"] = *row.Ndmi
+			}
+			if row.Ndre != nil {
+				entry["ndre"] = *row.Ndre
+			}
+			if row.Gndvi != nil {
+				entry["gndvi"] = *row.Gndvi
+			}
+			if row.Msavi != nil {
+				entry["msavi"] = *row.Msavi
+			}
+			if row.Vv != nil {
+				entry["vv"] = *row.Vv
+			}
+			if row.Vh != nil {
+				entry["vh"] = *row.Vh
+			}
+			if row.Nbr2 != nil {
+				entry["nbr2"] = *row.Nbr2
+			}
+			if row.BareSoilIndex != nil {
+				entry["bare_soil_index"] = *row.BareSoilIndex
+			}
+			if row.ValidPixelRatio != nil {
+				entry["valid_pixel_ratio"] = *row.ValidPixelRatio
+			}
+			if row.DryDays != nil {
+				entry["dry_days"] = *row.DryDays
+			}
+			if row.TemperatureCMean != nil {
+				entry["temperature_c_mean"] = *row.TemperatureCMean
+			}
+			if row.PrecipitationMm3d != nil {
+				entry["precipitation_mm_3d"] = *row.PrecipitationMm3d
+			}
+			if row.PrecipitationMm7d != nil {
+				entry["precipitation_mm_7d"] = *row.PrecipitationMm7d
+			}
+			if row.PrecipitationMm30d != nil {
+				entry["precipitation_mm_30d"] = *row.PrecipitationMm30d
+			}
 			tsJSON = append(tsJSON, entry)
 		}
 
@@ -590,10 +1007,10 @@ func (h *handlers) postFieldAnalyticsJobs(w http.ResponseWriter, r *http.Request
 
 	slog.Info("[analytics-jobs] published ML jobs", "field_id", fieldID, "tiles_total", len(tileIDs), "tiles_with_ts", tilesWithTs, "jobs_sent", published)
 	h.writeJSON(w, http.StatusAccepted, map[string]interface{}{
-		"status":         "accepted",
-		"tiles_total":    len(tileIDs),
-		"tiles_with_ts":  tilesWithTs,
-		"jobs_sent":      published,
+		"status":        "accepted",
+		"tiles_total":   len(tileIDs),
+		"tiles_with_ts": tilesWithTs,
+		"jobs_sent":     published,
 	})
 }
 
@@ -808,13 +1225,13 @@ func (h *handlers) getTileMetrics(w http.ResponseWriter, r *http.Request) {
 	observed := make([]map[string]any, 0, len(metrics.Observed))
 	for _, o := range metrics.Observed {
 		observed = append(observed, map[string]any{
-			"observation_date":    o.ObservationDate.Format(time.RFC3339),
+			"observation_date":     o.ObservationDate.Format(time.RFC3339),
 			"ndvi":                 o.Ndvi,
 			"ndmi":                 o.Ndmi,
 			"ndre":                 o.Ndre,
-			"valid_pixel_ratio":   o.ValidPixelRatio,
-			"stress_index":        o.StressIndex,
-			"temperature_c_mean":  o.TemperatureCMean,
+			"valid_pixel_ratio":    o.ValidPixelRatio,
+			"stress_index":         o.StressIndex,
+			"temperature_c_mean":   o.TemperatureCMean,
 			"precipitation_mm_3d":  o.PrecipitationMm3d,
 			"precipitation_mm_7d":  o.Mm7d,
 			"precipitation_mm_30d": o.Mm30d,
@@ -823,10 +1240,10 @@ func (h *handlers) getTileMetrics(w http.ResponseWriter, r *http.Request) {
 	predictions := make([]map[string]any, 0, len(metrics.Predictions))
 	for _, p := range metrics.Predictions {
 		m := map[string]any{
-			"id":               p.ID.String(),
-			"module":           p.Module,
-			"prediction_date":  p.PredictionDate.Format(time.RFC3339),
-			"status":           p.Status,
+			"id":              p.ID.String(),
+			"module":          p.Module,
+			"prediction_date": p.PredictionDate.Format(time.RFC3339),
+			"status":          p.Status,
 		}
 		if p.Degradation != nil {
 			m["degradation"] = p.Degradation

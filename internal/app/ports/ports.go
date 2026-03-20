@@ -181,7 +181,25 @@ type MLResultStore interface {
 // FieldAnalyticsRepository aggregates tile_timeseries into field_analytics_timeseries.
 type FieldAnalyticsRepository interface {
 	UpsertFieldAnalyticsForFieldAndDate(ctx context.Context, fieldID uuid.UUID, observationDate time.Time) error
+	UpsertFieldPredictedAnalyticsForFieldAndDate(ctx context.Context, fieldID uuid.UUID, observationDate time.Time, m PredictedFieldAnalyticsMeans) error
 	ListFieldAnalyticsByFieldID(ctx context.Context, fieldID uuid.UUID, dateFrom, dateTo *time.Time) ([]FieldAnalyticsRow, error)
+	DeleteFieldAnalyticsByDates(ctx context.Context, fieldID uuid.UUID, dates []time.Time) error
+}
+
+// PredictedFieldAnalyticsMeans holds field-level averages of ML outputs (finalize activity).
+type PredictedFieldAnalyticsMeans struct {
+	TileCount                int32
+	HeterogeneityScore       *float64
+	DegradationScore         *float64
+	VegetationCoverLossScore *float64
+	BareSoilExpansionScore   *float64
+	HealthScore              *float64
+	StressScoreTotal         *float64
+	WaterStress              *float64
+	Confidence               *float64
+	UnderIrrigationRiskScore *float64
+	OverIrrigationRiskScore  *float64
+	UniformityScore          *float64
 }
 
 // FieldAnalyticsRow is one row from field_analytics_timeseries for API.
@@ -195,19 +213,36 @@ type FieldAnalyticsRow struct {
 	NdviMean               *float64
 	NdmiMean               *float64
 	NdreMean               *float64
+	GndviMean              *float64
+	MsaviMean              *float64
+	Nbr2Mean               *float64
+	BareSoilIndexMean      *float64
 	ValidPixelRatioMean    *float64
 	StressIndexMean        *float64
 	TemperatureCMean       *float64
 	PrecipitationMm3dMean  *float64
 	PrecipitationMm7dMean  *float64
-	PrecipitationMm30dMean  *float64
-	CreatedAt              time.Time
+	PrecipitationMm30dMean *float64
+	HeterogeneityScore     *float64
+	// ML / predicted aggregates (typically source=predicted).
+	PredictionDegradationScore         *float64
+	PredictionVegetationCoverLossScore *float64
+	PredictionBareSoilExpansionScore   *float64
+	PredictionHealthScore              *float64
+	PredictionStressScoreTotal         *float64
+	PredictionWaterStress              *float64
+	PredictionConfidence               *float64
+	PredictionUnderIrrigationRiskScore *float64
+	PredictionOverIrrigationRiskScore  *float64
+	PredictionUniformityScore          *float64
+	CreatedAt                          time.Time
 }
 
 // AnalysisPmtilesRepository reads/writes PMTiles artifact URLs.
 type AnalysisPmtilesRepository interface {
 	ListByFieldID(ctx context.Context, fieldID uuid.UUID) ([]PmtilesArtifactRow, error)
 	UpsertArtifact(ctx context.Context, fieldID uuid.UUID, analysisKind string, analysisDate time.Time, module, pmtilesURL string) error
+	DeleteArtifactsByDates(ctx context.Context, fieldID uuid.UUID, dates []time.Time) error
 }
 
 // PmtilesArtifactRow is one row from analysis_pmtiles_artifacts for API.

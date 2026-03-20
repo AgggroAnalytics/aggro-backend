@@ -19,6 +19,10 @@ SELECT id, field_id, observation_date, source,
   dry_days_mean, bare_soil_index_mean, valid_pixel_ratio_mean,
   temperature_c_mean, precipitation_mm_3d_mean, precipitation_mm_7d_mean, precipitation_mm_30d_mean,
   stress_index_mean, ndvi_stddev, ndmi_stddev, ndre_stddev,
+  heterogeneity_score,
+  prediction_degradation_score, prediction_vegetation_cover_loss_score, prediction_bare_soil_expansion_score,
+  prediction_health_score, prediction_stress_score_total, prediction_water_stress, prediction_confidence,
+  prediction_under_irrigation_risk_score, prediction_over_irrigation_risk_score, prediction_uniformity_score,
   created_at
 FROM field_analytics_timeseries
 WHERE field_id = $1
@@ -34,32 +38,43 @@ type ListFieldAnalyticsByFieldIDParams struct {
 }
 
 type ListFieldAnalyticsByFieldIDRow struct {
-	ID                     uuid.UUID          `json:"id"`
-	FieldID                uuid.UUID          `json:"field_id"`
-	ObservationDate        pgtype.Timestamptz `json:"observation_date"`
-	Source                 AnalyticsSource    `json:"source"`
-	TileCount              pgtype.Int4        `json:"tile_count"`
-	ValidTileCount         pgtype.Int4        `json:"valid_tile_count"`
-	VhMean                 pgtype.Numeric     `json:"vh_mean"`
-	VvMean                 pgtype.Numeric     `json:"vv_mean"`
-	Nbr2Mean               pgtype.Numeric     `json:"nbr2_mean"`
-	NdmiMean               pgtype.Numeric     `json:"ndmi_mean"`
-	NdreMean               pgtype.Numeric     `json:"ndre_mean"`
-	NdviMean               pgtype.Numeric     `json:"ndvi_mean"`
-	GndviMean              pgtype.Numeric     `json:"gndvi_mean"`
-	MsaviMean              pgtype.Numeric     `json:"msavi_mean"`
-	DryDaysMean            pgtype.Numeric     `json:"dry_days_mean"`
-	BareSoilIndexMean      pgtype.Numeric     `json:"bare_soil_index_mean"`
-	ValidPixelRatioMean    pgtype.Numeric     `json:"valid_pixel_ratio_mean"`
-	TemperatureCMean       pgtype.Numeric     `json:"temperature_c_mean"`
-	PrecipitationMm3dMean  pgtype.Numeric     `json:"precipitation_mm_3d_mean"`
-	PrecipitationMm7dMean  pgtype.Numeric     `json:"precipitation_mm_7d_mean"`
-	PrecipitationMm30dMean pgtype.Numeric     `json:"precipitation_mm_30d_mean"`
-	StressIndexMean        pgtype.Numeric     `json:"stress_index_mean"`
-	NdviStddev             pgtype.Numeric     `json:"ndvi_stddev"`
-	NdmiStddev             pgtype.Numeric     `json:"ndmi_stddev"`
-	NdreStddev             pgtype.Numeric     `json:"ndre_stddev"`
-	CreatedAt              pgtype.Timestamptz `json:"created_at"`
+	ID                                 uuid.UUID          `json:"id"`
+	FieldID                            uuid.UUID          `json:"field_id"`
+	ObservationDate                    pgtype.Timestamptz `json:"observation_date"`
+	Source                             AnalyticsSource    `json:"source"`
+	TileCount                          pgtype.Int4        `json:"tile_count"`
+	ValidTileCount                     pgtype.Int4        `json:"valid_tile_count"`
+	VhMean                             pgtype.Numeric     `json:"vh_mean"`
+	VvMean                             pgtype.Numeric     `json:"vv_mean"`
+	Nbr2Mean                           pgtype.Numeric     `json:"nbr2_mean"`
+	NdmiMean                           pgtype.Numeric     `json:"ndmi_mean"`
+	NdreMean                           pgtype.Numeric     `json:"ndre_mean"`
+	NdviMean                           pgtype.Numeric     `json:"ndvi_mean"`
+	GndviMean                          pgtype.Numeric     `json:"gndvi_mean"`
+	MsaviMean                          pgtype.Numeric     `json:"msavi_mean"`
+	DryDaysMean                        pgtype.Numeric     `json:"dry_days_mean"`
+	BareSoilIndexMean                  pgtype.Numeric     `json:"bare_soil_index_mean"`
+	ValidPixelRatioMean                pgtype.Numeric     `json:"valid_pixel_ratio_mean"`
+	TemperatureCMean                   pgtype.Numeric     `json:"temperature_c_mean"`
+	PrecipitationMm3dMean              pgtype.Numeric     `json:"precipitation_mm_3d_mean"`
+	PrecipitationMm7dMean              pgtype.Numeric     `json:"precipitation_mm_7d_mean"`
+	PrecipitationMm30dMean             pgtype.Numeric     `json:"precipitation_mm_30d_mean"`
+	StressIndexMean                    pgtype.Numeric     `json:"stress_index_mean"`
+	NdviStddev                         pgtype.Numeric     `json:"ndvi_stddev"`
+	NdmiStddev                         pgtype.Numeric     `json:"ndmi_stddev"`
+	NdreStddev                         pgtype.Numeric     `json:"ndre_stddev"`
+	HeterogeneityScore                 pgtype.Numeric     `json:"heterogeneity_score"`
+	PredictionDegradationScore         pgtype.Numeric     `json:"prediction_degradation_score"`
+	PredictionVegetationCoverLossScore pgtype.Numeric     `json:"prediction_vegetation_cover_loss_score"`
+	PredictionBareSoilExpansionScore   pgtype.Numeric     `json:"prediction_bare_soil_expansion_score"`
+	PredictionHealthScore              pgtype.Numeric     `json:"prediction_health_score"`
+	PredictionStressScoreTotal         pgtype.Numeric     `json:"prediction_stress_score_total"`
+	PredictionWaterStress              pgtype.Numeric     `json:"prediction_water_stress"`
+	PredictionConfidence               pgtype.Numeric     `json:"prediction_confidence"`
+	PredictionUnderIrrigationRiskScore pgtype.Numeric     `json:"prediction_under_irrigation_risk_score"`
+	PredictionOverIrrigationRiskScore  pgtype.Numeric     `json:"prediction_over_irrigation_risk_score"`
+	PredictionUniformityScore          pgtype.Numeric     `json:"prediction_uniformity_score"`
+	CreatedAt                          pgtype.Timestamptz `json:"created_at"`
 }
 
 func (q *Queries) ListFieldAnalyticsByFieldID(ctx context.Context, arg ListFieldAnalyticsByFieldIDParams) ([]ListFieldAnalyticsByFieldIDRow, error) {
@@ -97,6 +112,17 @@ func (q *Queries) ListFieldAnalyticsByFieldID(ctx context.Context, arg ListField
 			&i.NdviStddev,
 			&i.NdmiStddev,
 			&i.NdreStddev,
+			&i.HeterogeneityScore,
+			&i.PredictionDegradationScore,
+			&i.PredictionVegetationCoverLossScore,
+			&i.PredictionBareSoilExpansionScore,
+			&i.PredictionHealthScore,
+			&i.PredictionStressScoreTotal,
+			&i.PredictionWaterStress,
+			&i.PredictionConfidence,
+			&i.PredictionUnderIrrigationRiskScore,
+			&i.PredictionOverIrrigationRiskScore,
+			&i.PredictionUniformityScore,
 			&i.CreatedAt,
 		); err != nil {
 			return nil, err
@@ -170,5 +196,86 @@ type UpsertFieldAnalyticsForFieldAndDateParams struct {
 // Upsert aggregated field metrics for one (field_id, observation_date) from tile_timeseries.
 func (q *Queries) UpsertFieldAnalyticsForFieldAndDate(ctx context.Context, arg UpsertFieldAnalyticsForFieldAndDateParams) error {
 	_, err := q.db.Exec(ctx, upsertFieldAnalyticsForFieldAndDate, arg.FieldID, arg.ObservationDate)
+	return err
+}
+
+const upsertFieldPredictedAnalyticsForFieldAndDate = `-- name: UpsertFieldPredictedAnalyticsForFieldAndDate :exec
+INSERT INTO field_analytics_timeseries (
+  id, field_id, observation_date, source,
+  tile_count,
+  heterogeneity_score,
+  prediction_degradation_score, prediction_vegetation_cover_loss_score, prediction_bare_soil_expansion_score,
+  prediction_health_score, prediction_stress_score_total, prediction_water_stress, prediction_confidence,
+  prediction_under_irrigation_risk_score, prediction_over_irrigation_risk_score, prediction_uniformity_score,
+  created_at
+) VALUES (
+  gen_random_uuid(),
+  $1,
+  $2,
+  'predicted'::analytics_source,
+  $3,
+  $4,
+  $5,
+  $6,
+  $7,
+  $8,
+  $9,
+  $10,
+  $11,
+  $12,
+  $13,
+  $14,
+  now()
+)
+ON CONFLICT (field_id, observation_date, source) DO UPDATE SET
+  tile_count = EXCLUDED.tile_count,
+  heterogeneity_score = EXCLUDED.heterogeneity_score,
+  prediction_degradation_score = EXCLUDED.prediction_degradation_score,
+  prediction_vegetation_cover_loss_score = EXCLUDED.prediction_vegetation_cover_loss_score,
+  prediction_bare_soil_expansion_score = EXCLUDED.prediction_bare_soil_expansion_score,
+  prediction_health_score = EXCLUDED.prediction_health_score,
+  prediction_stress_score_total = EXCLUDED.prediction_stress_score_total,
+  prediction_water_stress = EXCLUDED.prediction_water_stress,
+  prediction_confidence = EXCLUDED.prediction_confidence,
+  prediction_under_irrigation_risk_score = EXCLUDED.prediction_under_irrigation_risk_score,
+  prediction_over_irrigation_risk_score = EXCLUDED.prediction_over_irrigation_risk_score,
+  prediction_uniformity_score = EXCLUDED.prediction_uniformity_score,
+  created_at = now()
+`
+
+type UpsertFieldPredictedAnalyticsForFieldAndDateParams struct {
+	FieldID                            uuid.UUID          `json:"field_id"`
+	ObservationDate                    pgtype.Timestamptz `json:"observation_date"`
+	TileCount                          pgtype.Int4        `json:"tile_count"`
+	HeterogeneityScore                 pgtype.Numeric     `json:"heterogeneity_score"`
+	PredictionDegradationScore         pgtype.Numeric     `json:"prediction_degradation_score"`
+	PredictionVegetationCoverLossScore pgtype.Numeric     `json:"prediction_vegetation_cover_loss_score"`
+	PredictionBareSoilExpansionScore   pgtype.Numeric     `json:"prediction_bare_soil_expansion_score"`
+	PredictionHealthScore              pgtype.Numeric     `json:"prediction_health_score"`
+	PredictionStressScoreTotal         pgtype.Numeric     `json:"prediction_stress_score_total"`
+	PredictionWaterStress              pgtype.Numeric     `json:"prediction_water_stress"`
+	PredictionConfidence               pgtype.Numeric     `json:"prediction_confidence"`
+	PredictionUnderIrrigationRiskScore pgtype.Numeric     `json:"prediction_under_irrigation_risk_score"`
+	PredictionOverIrrigationRiskScore  pgtype.Numeric     `json:"prediction_over_irrigation_risk_score"`
+	PredictionUniformityScore          pgtype.Numeric     `json:"prediction_uniformity_score"`
+}
+
+func (q *Queries) UpsertFieldPredictedAnalyticsForFieldAndDate(ctx context.Context, arg UpsertFieldPredictedAnalyticsForFieldAndDateParams) error {
+	_, err := q.db.Exec(ctx, upsertFieldPredictedAnalyticsForFieldAndDate,
+		arg.FieldID,
+		arg.ObservationDate,
+		arg.TileCount,
+		arg.HeterogeneityScore,
+		arg.PredictionDegradationScore,
+		arg.PredictionVegetationCoverLossScore,
+		arg.PredictionBareSoilExpansionScore,
+		arg.PredictionHealthScore,
+		arg.PredictionStressScoreTotal,
+		arg.PredictionWaterStress,
+		arg.PredictionConfidence,
+		arg.PredictionUnderIrrigationRiskScore,
+		arg.PredictionOverIrrigationRiskScore,
+		arg.PredictionUniformityScore,
+	)
 	return err
 }

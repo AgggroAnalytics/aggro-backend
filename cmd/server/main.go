@@ -12,9 +12,9 @@ import (
 	"github.com/AgggroAnalytics/aggro-backend/internal/adapters/broker/rabbitmq"
 	"github.com/AgggroAnalytics/aggro-backend/internal/adapters/http_adapter"
 	"github.com/AgggroAnalytics/aggro-backend/internal/adapters/postgres"
+	"github.com/AgggroAnalytics/aggro-backend/internal/adapters/temporalworkflows"
 	"github.com/AgggroAnalytics/aggro-backend/internal/app/consumer"
 	fieldusecase "github.com/AgggroAnalytics/aggro-backend/internal/app/usecase/field"
-	"github.com/AgggroAnalytics/aggro-backend/internal/adapters/temporalworkflows"
 	"github.com/AgggroAnalytics/aggro-backend/internal/migrate"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/rabbitmq/amqp091-go"
@@ -151,36 +151,56 @@ func main() {
 	fieldUC := fieldusecase.NewFieldsUseCase(fieldsRepo, seasonRepo, tilesPub, cfg.BackendReplyQueue)
 	pmtilesRepo := postgres.NewAnalysisPmtilesPostgres(pool)
 
-	var temporalFieldLister *temporalworkflows.Lister
-	if cfg.TemporalAddress != "" {
-		tc, terr := client.Dial(client.Options{
-			HostPort:  cfg.TemporalAddress,
-			Namespace: cfg.TemporalNamespace,
-		})
-		if terr != nil {
-			slog.Warn("temporal client for /fields/{id}/workflows", "err", terr)
-		} else {
-			temporalFieldLister = &temporalworkflows.Lister{Client: tc, Namespace: cfg.TemporalNamespace}
-		}
+	deps := &httpadapter.RouterDeps{
+		FieldUC:              fieldUC,
+		FieldRepo:            fieldsRepo,
+		SeasonRepo:           seasonRepo,
+		FieldAnalyticsRepo:   fieldAnalyticsRepo,
+		PmtilesRepo:          pmtilesRepo,
+		TileRepo:             tileRepo,
+		PmtilesBuild:         pmtilesBuildPub,
+		OrganizationRepo:     organizationRepo,
+		UserRepo:             userRepo,
+		TileMetricsReader:    tileMetricsReader,
+		TileTsRepo:           tileTsRepo,
+		MLPublisher:          mlPub,
+		S3Client:             httpadapter.NewS3Client(cfg.S3InternalURL, cfg.S3AccessKey, cfg.S3SecretKey, cfg.S3Region),
+		S3Bucket:             cfg.S3Bucket,
+		TemporalNamespace:    cfg.TemporalNamespace,
+		TemporalTaskQueue:    cfg.TemporalTaskQueue,
+		TemporalBackendQueue: cfg.TemporalBackendTaskQueue,
 	}
 
-	router := httpadapter.NewRouter(&httpadapter.RouterDeps{
-		FieldUC:            fieldUC,
-		FieldRepo:          fieldsRepo,
-		SeasonRepo:         seasonRepo,
-		FieldAnalyticsRepo: fieldAnalyticsRepo,
-		PmtilesRepo:        pmtilesRepo,
-		TileRepo:           tileRepo,
-		PmtilesBuild:       pmtilesBuildPub,
-		OrganizationRepo:   organizationRepo,
-		UserRepo:           userRepo,
-		TileMetricsReader:  tileMetricsReader,
-		TileTsRepo:         tileTsRepo,
-		MLPublisher:        mlPub,
-		S3Client:               httpadapter.NewS3Client(cfg.S3InternalURL, cfg.S3AccessKey, cfg.S3SecretKey, cfg.S3Region),
-		S3Bucket:               cfg.S3Bucket,
-		TemporalFieldWorkflows: temporalFieldLister,
-	})
+	// Temporal client is optional (used for /fields/{id}/workflows listing).
+	// Connect in background so it never blocks HTTP server startup.
+	if cfg.TemporalAddress != "" {
+		go func() {
+			for {
+				if ctx.Err() != nil {
+					return
+				}
+				tc, terr := client.Dial(client.Options{
+					HostPort:  cfg.TemporalAddress,
+					Namespace: cfg.TemporalNamespace,
+				})
+				if terr != nil {
+					slog.Warn("temporal client not ready, retrying in 5s", "err", terr)
+					select {
+					case <-ctx.Done():
+						return
+					case <-time.After(5 * time.Second):
+					}
+					continue
+				}
+				deps.TemporalFieldWorkflows = &temporalworkflows.Lister{Client: tc, Namespace: cfg.TemporalNamespace}
+				deps.TemporalClient = tc
+				slog.Info("temporal client connected", "addr", cfg.TemporalAddress)
+				return
+			}
+		}()
+	}
+
+	router := httpadapter.NewRouter(deps)
 	handler := http.Handler(router)
 	if cfg.KeycloakIssuer != "" {
 		handler = httpadapter.AuthMiddleware(cfg.KeycloakIssuer, cfg.KeycloakJWKSURI, httpadapter.EnsureUserMiddleware(userRepo, router))
@@ -208,54 +228,58 @@ func main() {
 }
 
 type config struct {
-	DatabaseURL       string
-	RabbitURL         string
-	BackendReplyQueue string
-	TilesExchange     string
-	TilesRouting      string
-	GeoExchange       string
-	GeoRouting        string
-	MLExchange        string
-	MLRouting         string
-	PmtilesExchange   string
-	PmtilesRouting    string
-	HTTPAddr          string
-	KeycloakIssuer    string
-	KeycloakJWKSURI   string
-	S3InternalURL     string
-	S3Bucket          string
-	S3AccessKey       string
-	S3SecretKey       string
-	S3Region            string
-	TemporalAddress     string
-	TemporalNamespace   string
-	CORSAllowOrigins    string
+	DatabaseURL              string
+	RabbitURL                string
+	BackendReplyQueue        string
+	TilesExchange            string
+	TilesRouting             string
+	GeoExchange              string
+	GeoRouting               string
+	MLExchange               string
+	MLRouting                string
+	PmtilesExchange          string
+	PmtilesRouting           string
+	HTTPAddr                 string
+	KeycloakIssuer           string
+	KeycloakJWKSURI          string
+	S3InternalURL            string
+	S3Bucket                 string
+	S3AccessKey              string
+	S3SecretKey              string
+	S3Region                 string
+	TemporalAddress          string
+	TemporalNamespace        string
+	TemporalTaskQueue        string
+	TemporalBackendTaskQueue string
+	CORSAllowOrigins         string
 }
 
 func configFromEnv() config {
 	return config{
-		DatabaseURL:       getEnv("DATABASE_URL", "postgresql://postgres:postgres@localhost:5432/aggro"),
-		RabbitURL:         getEnv("RABBIT_URL", "amqp://guest:guest@localhost:5672/"),
-		BackendReplyQueue: getEnv("BACKEND_REPLY_QUEUE", "field.backend.replies"),
-		TilesExchange:     getEnv("TILES_EXCHANGE", "field.tiles.exchange"),
-		TilesRouting:      getEnv("TILES_ROUTING", "field.tiles.main"),
-		GeoExchange:       getEnv("GEO_EXCHANGE", "field.geo.exchange"),
-		GeoRouting:        getEnv("GEO_ROUTING", "field.geo.main"),
-		MLExchange:        getEnv("ML_EXCHANGE", "field.ml.exchange"),
-		MLRouting:         getEnv("ML_ROUTING", "field.ml.main"),
-		PmtilesExchange:   getEnv("PMTILES_EXCHANGE", "field.pmtiles.exchange"),
-		PmtilesRouting:    getEnv("PMTILES_ROUTING", "field.pmtiles.build"),
-		HTTPAddr:          getEnv("HTTP_ADDR", ":8080"),
-		KeycloakIssuer:    getEnv("KEYCLOAK_ISSUER", ""),
-		KeycloakJWKSURI:   getEnv("KEYCLOAK_JWKS_URI", ""),
-		S3InternalURL:     getEnv("S3_INTERNAL_URL", "http://localhost:9000"),
-		S3Bucket:          getEnv("S3_BUCKET", "aggro"),
-		S3AccessKey:       getEnv("S3_ACCESS_KEY_ID", "minioadmin"),
-		S3SecretKey:       getEnv("S3_SECRET_ACCESS_KEY", "minioadmin"),
-		S3Region:          getEnv("S3_REGION", "us-east-1"),
-		TemporalAddress:   getEnv("TEMPORAL_ADDRESS", ""),
-		TemporalNamespace: getEnv("TEMPORAL_NAMESPACE", "default"),
-		CORSAllowOrigins:  getEnv("CORS_ALLOW_ORIGINS", ""),
+		DatabaseURL:              getEnv("DATABASE_URL", "postgresql://postgres:postgres@localhost:5432/aggro"),
+		RabbitURL:                getEnv("RABBIT_URL", "amqp://guest:guest@localhost:5672/"),
+		BackendReplyQueue:        getEnv("BACKEND_REPLY_QUEUE", "field.backend.replies"),
+		TilesExchange:            getEnv("TILES_EXCHANGE", "field.tiles.exchange"),
+		TilesRouting:             getEnv("TILES_ROUTING", "field.tiles.main"),
+		GeoExchange:              getEnv("GEO_EXCHANGE", "field.geo.exchange"),
+		GeoRouting:               getEnv("GEO_ROUTING", "field.geo.main"),
+		MLExchange:               getEnv("ML_EXCHANGE", "field.ml.exchange"),
+		MLRouting:                getEnv("ML_ROUTING", "field.ml.main"),
+		PmtilesExchange:          getEnv("PMTILES_EXCHANGE", "field.pmtiles.exchange"),
+		PmtilesRouting:           getEnv("PMTILES_ROUTING", "field.pmtiles.build"),
+		HTTPAddr:                 getEnv("HTTP_ADDR", ":8080"),
+		KeycloakIssuer:           getEnv("KEYCLOAK_ISSUER", ""),
+		KeycloakJWKSURI:          getEnv("KEYCLOAK_JWKS_URI", ""),
+		S3InternalURL:            getEnv("S3_INTERNAL_URL", "http://localhost:9000"),
+		S3Bucket:                 getEnv("S3_BUCKET", "aggro"),
+		S3AccessKey:              getEnv("S3_ACCESS_KEY_ID", "minioadmin"),
+		S3SecretKey:              getEnv("S3_SECRET_ACCESS_KEY", "minioadmin"),
+		S3Region:                 getEnv("S3_REGION", "us-east-1"),
+		TemporalAddress:          getEnv("TEMPORAL_ADDRESS", ""),
+		TemporalNamespace:        getEnv("TEMPORAL_NAMESPACE", "default"),
+		TemporalTaskQueue:        getEnv("TEMPORAL_TASK_QUEUE", "field-processing"),
+		TemporalBackendTaskQueue: getEnv("TEMPORAL_BACKEND_TASK_QUEUE", "aggro-backend"),
+		CORSAllowOrigins:         getEnv("CORS_ALLOW_ORIGINS", ""),
 	}
 }
 
