@@ -69,6 +69,10 @@ func (r *AnalysisPmtilesPostgres) ListByFieldID(ctx context.Context, fieldID uui
 	return out, nil
 }
 
+func (r *AnalysisPmtilesPostgres) DeletePredictionArtifactsByFieldID(ctx context.Context, fieldID uuid.UUID) error {
+	return r.queries(ctx).DeletePredictionArtifactsByFieldID(ctx, fieldID)
+}
+
 func (r *AnalysisPmtilesPostgres) UpsertArtifact(ctx context.Context, fieldID uuid.UUID, analysisKind string, analysisDate time.Time, module, pmtilesURL string) error {
 	d := pgtype.Date{Time: analysisDate.UTC().Truncate(24 * time.Hour), Valid: true}
 	return r.queries(ctx).UpsertAnalysisPmtilesArtifact(ctx, sqlc.UpsertAnalysisPmtilesArtifactParams{

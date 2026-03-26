@@ -225,6 +225,9 @@ CREATE TABLE IF NOT EXISTS field_analytics_timeseries (
   prediction_under_irrigation_risk_score NUMERIC,
   prediction_over_irrigation_risk_score NUMERIC,
   prediction_uniformity_score NUMERIC,
+  prediction_vegetation_activity_drop NUMERIC,
+  prediction_heterogeneity_growth NUMERIC,
+  prediction_irrigation_events_detected NUMERIC,
 
   created_at timestamptz NOT NULL DEFAULT now(),
 

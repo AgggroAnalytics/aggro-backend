@@ -9,3 +9,7 @@ INSERT INTO analysis_pmtiles_artifacts (field_id, analysis_kind, analysis_date, 
 VALUES ($1, $2, $3, $4, $5)
 ON CONFLICT (field_id, analysis_kind, analysis_date, module)
 DO UPDATE SET pmtiles_url = EXCLUDED.pmtiles_url, created_at = now();
+
+-- name: DeletePredictionArtifactsByFieldID :exec
+DELETE FROM analysis_pmtiles_artifacts
+WHERE field_id = sqlc.arg(field_id) AND analysis_kind = 'prediction';

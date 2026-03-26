@@ -49,8 +49,29 @@ func (r *UsersPostgres) GetByID(ctx context.Context, id uuid.UUID) (*domain.User
 	return sqlcUserToDomain(u), nil
 }
 
+func (r *UsersPostgres) GetByUsername(ctx context.Context, username string) (*domain.User, error) {
+	u, err := r.queries(ctx).GetUserByUsername(ctx, username)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return sqlcUserToDomain(u), nil
+}
+
 func (r *UsersPostgres) Create(ctx context.Context, user *domain.User) error {
 	return r.queries(ctx).CreateUser(ctx, sqlc.CreateUserParams{
+		ID:        user.ID,
+		Username:  user.Username,
+		FirstName: user.Firstname,
+		LastName:  user.LastName,
+		Email:     user.Email,
+	})
+}
+
+func (r *UsersPostgres) Upsert(ctx context.Context, user *domain.User) error {
+	return r.queries(ctx).UpsertUser(ctx, sqlc.UpsertUserParams{
 		ID:        user.ID,
 		Username:  user.Username,
 		FirstName: user.Firstname,

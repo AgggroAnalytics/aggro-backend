@@ -115,6 +115,14 @@ func AuthMiddleware(issuer, jwksURI string, next http.Handler) http.Handler {
 	})
 }
 
+func shortUserSuffix(id uuid.UUID) string {
+	s := strings.ReplaceAll(id.String(), "-", "")
+	if len(s) > 8 {
+		return s[:8]
+	}
+	return s
+}
+
 // EnsureUserMiddleware creates the user in the backend DB on first authenticated request (after Keycloak login/register).
 func EnsureUserMiddleware(userRepo ports.UserRepository, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -131,7 +139,7 @@ func EnsureUserMiddleware(userRepo ports.UserRepository, next http.Handler) http
 		u, err := userRepo.GetByID(r.Context(), userID)
 		if err != nil {
 			slog.Error("ensure user get", "sub", claims.Sub, "err", err)
-			next.ServeHTTP(w, r)
+			http.Error(w, `{"error":"user lookup failed"}`, http.StatusInternalServerError)
 			return
 		}
 		if u != nil {
@@ -144,6 +152,13 @@ func EnsureUserMiddleware(userRepo ports.UserRepository, next http.Handler) http
 		}
 		if username == "" {
 			username = claims.Sub
+		}
+		if existingByUsername, err := userRepo.GetByUsername(r.Context(), username); err != nil {
+			slog.Error("ensure user get by username", "sub", claims.Sub, "username", username, "err", err)
+			http.Error(w, `{"error":"user lookup failed"}`, http.StatusInternalServerError)
+			return
+		} else if existingByUsername != nil && existingByUsername.ID != userID {
+			username = username + "-" + shortUserSuffix(userID)
 		}
 		givenName, familyName := claims.GivenName, claims.FamilyName
 		if givenName == "" {
@@ -162,8 +177,17 @@ func EnsureUserMiddleware(userRepo ports.UserRepository, next http.Handler) http
 		if newUser.Email == "" {
 			newUser.Email = claims.PreferredUsername + "@keycloak"
 		}
-		if err := userRepo.Create(r.Context(), newUser); err != nil {
-			slog.Error("ensure user create", "sub", claims.Sub, "err", err)
+		if existingByEmail, err := userRepo.GetByEmail(r.Context(), newUser.Email); err != nil {
+			slog.Error("ensure user get by email", "sub", claims.Sub, "email", newUser.Email, "err", err)
+			http.Error(w, `{"error":"user lookup failed"}`, http.StatusInternalServerError)
+			return
+		} else if existingByEmail != nil && existingByEmail.ID != userID {
+			newUser.Email = userID.String() + "@keycloak.local"
+		}
+		if err := userRepo.Upsert(r.Context(), newUser); err != nil {
+			slog.Error("ensure user upsert", "sub", claims.Sub, "err", err)
+			http.Error(w, `{"error":"could not provision local user"}`, http.StatusInternalServerError)
+			return
 		}
 		next.ServeHTTP(w, r)
 	})

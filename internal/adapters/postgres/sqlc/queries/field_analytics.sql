@@ -9,6 +9,7 @@ SELECT id, field_id, observation_date, source,
   prediction_degradation_score, prediction_vegetation_cover_loss_score, prediction_bare_soil_expansion_score,
   prediction_health_score, prediction_stress_score_total, prediction_water_stress, prediction_confidence,
   prediction_under_irrigation_risk_score, prediction_over_irrigation_risk_score, prediction_uniformity_score,
+  prediction_vegetation_activity_drop, prediction_heterogeneity_growth, prediction_irrigation_events_detected,
   created_at
 FROM field_analytics_timeseries
 WHERE field_id = sqlc.arg(field_id)
@@ -77,6 +78,7 @@ INSERT INTO field_analytics_timeseries (
   prediction_degradation_score, prediction_vegetation_cover_loss_score, prediction_bare_soil_expansion_score,
   prediction_health_score, prediction_stress_score_total, prediction_water_stress, prediction_confidence,
   prediction_under_irrigation_risk_score, prediction_over_irrigation_risk_score, prediction_uniformity_score,
+  prediction_vegetation_activity_drop, prediction_heterogeneity_growth, prediction_irrigation_events_detected,
   created_at
 ) VALUES (
   gen_random_uuid(),
@@ -95,6 +97,9 @@ INSERT INTO field_analytics_timeseries (
   sqlc.narg(prediction_under_irrigation_risk_score),
   sqlc.narg(prediction_over_irrigation_risk_score),
   sqlc.narg(prediction_uniformity_score),
+  sqlc.narg(prediction_vegetation_activity_drop),
+  sqlc.narg(prediction_heterogeneity_growth),
+  sqlc.narg(prediction_irrigation_events_detected),
   now()
 )
 ON CONFLICT (field_id, observation_date, source) DO UPDATE SET
@@ -110,4 +115,11 @@ ON CONFLICT (field_id, observation_date, source) DO UPDATE SET
   prediction_under_irrigation_risk_score = EXCLUDED.prediction_under_irrigation_risk_score,
   prediction_over_irrigation_risk_score = EXCLUDED.prediction_over_irrigation_risk_score,
   prediction_uniformity_score = EXCLUDED.prediction_uniformity_score,
+  prediction_vegetation_activity_drop = EXCLUDED.prediction_vegetation_activity_drop,
+  prediction_heterogeneity_growth = EXCLUDED.prediction_heterogeneity_growth,
+  prediction_irrigation_events_detected = EXCLUDED.prediction_irrigation_events_detected,
   created_at = now();
+
+-- name: DeletePredictedFieldAnalyticsByFieldID :exec
+DELETE FROM field_analytics_timeseries
+WHERE field_id = sqlc.arg(field_id) AND source = 'predicted';

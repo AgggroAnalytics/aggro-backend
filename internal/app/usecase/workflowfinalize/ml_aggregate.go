@@ -38,7 +38,7 @@ func (a *meanAgg) avg() *float64 {
 // AggregateMLResults averages ML JSON payloads (typically one tile × module per item).
 // Count returned is the number of non-error payloads unmarshalled successfully.
 func AggregateMLResults(raw []json.RawMessage) (ports.PredictedFieldAnalyticsMeans, int) {
-	var het, deg, veg, bare, health, stress, water, conf, under, over, uniform meanAgg
+	var deg, health, stress, water, vegDrop, hetGrowth, conf, events meanAgg
 	usable := 0
 
 	for _, body := range raw {
@@ -53,51 +53,42 @@ func AggregateMLResults(raw []json.RawMessage) (ports.PredictedFieldAnalyticsMea
 		}
 
 		var p struct {
-			HeterogeneityScore       *int `json:"heterogeneity_score"`
-			DegradationScore         *int `json:"degradation_score"`
-			VegetationCoverLossScore *int `json:"vegetation_cover_loss_score"`
-			BareSoilExpansionScore   *int `json:"bare_soil_expansion_score"`
-			HealthScore              *int `json:"health_score"`
-			StressScoreTotal         *int `json:"stress_score_total"`
-			StressScores             *struct {
-				WaterStress *int `json:"water_stress"`
+			DegradationScore        *int `json:"degradation_score"`
+			HealthScore             *int `json:"health_score"`
+			StressScoreTotal        *int `json:"stress_score_total"`
+			StressScores            *struct {
+				WaterStress            *int `json:"water_stress"`
+				VegetationActivityDrop *int `json:"vegetation_activity_drop"`
+				HeterogeneityGrowth    *int `json:"heterogeneity_growth"`
 			} `json:"stress_scores"`
-			Confidence               *float64 `json:"confidence"`
-			UnderIrrigationRiskScore *int     `json:"under_irrigation_risk_score"`
-			OverIrrigationRiskScore  *int     `json:"over_irrigation_risk_score"`
-			UniformityScore          *int     `json:"uniformity_score"`
+			Confidence              *float64 `json:"confidence"`
+			IrrigationEventsDetected *int    `json:"irrigation_events_detected"`
 		}
 		if err := json.Unmarshal(body, &p); err != nil {
 			continue
 		}
 		usable++
-		het.addInt(p.HeterogeneityScore)
 		deg.addInt(p.DegradationScore)
-		veg.addInt(p.VegetationCoverLossScore)
-		bare.addInt(p.BareSoilExpansionScore)
 		health.addInt(p.HealthScore)
 		stress.addInt(p.StressScoreTotal)
 		if p.StressScores != nil {
 			water.addInt(p.StressScores.WaterStress)
+			vegDrop.addInt(p.StressScores.VegetationActivityDrop)
+			hetGrowth.addInt(p.StressScores.HeterogeneityGrowth)
 		}
 		conf.addFloat(p.Confidence)
-		under.addInt(p.UnderIrrigationRiskScore)
-		over.addInt(p.OverIrrigationRiskScore)
-		uniform.addInt(p.UniformityScore)
+		events.addInt(p.IrrigationEventsDetected)
 	}
 
 	out := ports.PredictedFieldAnalyticsMeans{
-		HeterogeneityScore:       het.avg(),
 		DegradationScore:         deg.avg(),
-		VegetationCoverLossScore: veg.avg(),
-		BareSoilExpansionScore:   bare.avg(),
 		HealthScore:              health.avg(),
 		StressScoreTotal:         stress.avg(),
 		WaterStress:              water.avg(),
+		VegetationActivityDrop:   vegDrop.avg(),
+		HeterogeneityGrowth:      hetGrowth.avg(),
 		Confidence:               conf.avg(),
-		UnderIrrigationRiskScore: under.avg(),
-		OverIrrigationRiskScore:  over.avg(),
-		UniformityScore:          uniform.avg(),
+		IrrigationEventsDetected: events.avg(),
 	}
 	return out, usable
 }

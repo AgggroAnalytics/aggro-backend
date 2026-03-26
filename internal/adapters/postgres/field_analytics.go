@@ -66,23 +66,24 @@ func (r *FieldAnalyticsPostgres) UpsertFieldAnalyticsForFieldAndDate(ctx context
 	})
 }
 
+func (r *FieldAnalyticsPostgres) DeletePredictedFieldAnalyticsByFieldID(ctx context.Context, fieldID uuid.UUID) error {
+	return r.queries(ctx).DeletePredictedFieldAnalyticsByFieldID(ctx, fieldID)
+}
+
 func (r *FieldAnalyticsPostgres) UpsertFieldPredictedAnalyticsForFieldAndDate(ctx context.Context, fieldID uuid.UUID, observationDate time.Time, m ports.PredictedFieldAnalyticsMeans) error {
 	q := r.queries(ctx)
 	return q.UpsertFieldPredictedAnalyticsForFieldAndDate(ctx, sqlc.UpsertFieldPredictedAnalyticsForFieldAndDateParams{
 		FieldID:                            fieldID,
 		ObservationDate:                    pgtype.Timestamptz{Time: observationDate, Valid: true},
 		TileCount:                          pgtype.Int4{Int32: m.TileCount, Valid: true},
-		HeterogeneityScore:                 floatPtrToNumeric(m.HeterogeneityScore),
 		PredictionDegradationScore:         floatPtrToNumeric(m.DegradationScore),
-		PredictionVegetationCoverLossScore: floatPtrToNumeric(m.VegetationCoverLossScore),
-		PredictionBareSoilExpansionScore:   floatPtrToNumeric(m.BareSoilExpansionScore),
 		PredictionHealthScore:              floatPtrToNumeric(m.HealthScore),
 		PredictionStressScoreTotal:         floatPtrToNumeric(m.StressScoreTotal),
 		PredictionWaterStress:              floatPtrToNumeric(m.WaterStress),
+		PredictionVegetationActivityDrop:   floatPtrToNumeric(m.VegetationActivityDrop),
+		PredictionHeterogeneityGrowth:      floatPtrToNumeric(m.HeterogeneityGrowth),
 		PredictionConfidence:               floatPtrToNumeric(m.Confidence),
-		PredictionUnderIrrigationRiskScore: floatPtrToNumeric(m.UnderIrrigationRiskScore),
-		PredictionOverIrrigationRiskScore:  floatPtrToNumeric(m.OverIrrigationRiskScore),
-		PredictionUniformityScore:          floatPtrToNumeric(m.UniformityScore),
+		PredictionIrrigationEventsDetected: floatPtrToNumeric(m.IrrigationEventsDetected),
 	})
 }
 
@@ -140,7 +141,10 @@ func (r *FieldAnalyticsPostgres) ListFieldAnalyticsByFieldID(ctx context.Context
 			PredictionHealthScore:              pgFloat64(row.PredictionHealthScore),
 			PredictionStressScoreTotal:         pgFloat64(row.PredictionStressScoreTotal),
 			PredictionWaterStress:              pgFloat64(row.PredictionWaterStress),
+			PredictionVegetationActivityDrop:   pgFloat64(row.PredictionVegetationActivityDrop),
+			PredictionHeterogeneityGrowth:      pgFloat64(row.PredictionHeterogeneityGrowth),
 			PredictionConfidence:               pgFloat64(row.PredictionConfidence),
+			PredictionIrrigationEventsDetected: pgFloat64(row.PredictionIrrigationEventsDetected),
 			PredictionUnderIrrigationRiskScore: pgFloat64(row.PredictionUnderIrrigationRiskScore),
 			PredictionOverIrrigationRiskScore:  pgFloat64(row.PredictionOverIrrigationRiskScore),
 			PredictionUniformityScore:          pgFloat64(row.PredictionUniformityScore),

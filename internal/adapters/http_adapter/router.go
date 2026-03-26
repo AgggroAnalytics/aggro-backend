@@ -397,7 +397,7 @@ func (h *handlers) startFieldWorkflow(w http.ResponseWriter, r *http.Request) {
 	requestPayload := map[string]any{
 		"field_id":           id.String(),
 		"field_geom":         map[string]any{"type": "Polygon", "coordinates": domainPolygonToRings(field.Coordinates)},
-		"tile_size_m":        24,
+		"tile_size_m":        16,
 		"min_coverage_ratio": 0,
 		"include_tile_geom":  true,
 		"from_date":          fromDate,
@@ -836,7 +836,10 @@ func fieldAnalyticsRowToJSON(row ports.FieldAnalyticsRow) fieldAnalyticsRowJSON 
 		PredictionHealthScore:              row.PredictionHealthScore,
 		PredictionStressScoreTotal:         row.PredictionStressScoreTotal,
 		PredictionWaterStress:              row.PredictionWaterStress,
+		PredictionVegetationActivityDrop:   row.PredictionVegetationActivityDrop,
+		PredictionHeterogeneityGrowth:      row.PredictionHeterogeneityGrowth,
 		PredictionConfidence:               row.PredictionConfidence,
+		PredictionIrrigationEventsDetected: row.PredictionIrrigationEventsDetected,
 		PredictionUnderIrrigationRiskScore: row.PredictionUnderIrrigationRiskScore,
 		PredictionOverIrrigationRiskScore:  row.PredictionOverIrrigationRiskScore,
 		PredictionUniformityScore:          row.PredictionUniformityScore,
@@ -872,7 +875,10 @@ type fieldAnalyticsRowJSON struct {
 	PredictionHealthScore              *float64 `json:"prediction_health_score,omitempty"`
 	PredictionStressScoreTotal         *float64 `json:"prediction_stress_score_total,omitempty"`
 	PredictionWaterStress              *float64 `json:"prediction_water_stress,omitempty"`
+	PredictionVegetationActivityDrop   *float64 `json:"prediction_vegetation_activity_drop,omitempty"`
+	PredictionHeterogeneityGrowth      *float64 `json:"prediction_heterogeneity_growth,omitempty"`
 	PredictionConfidence               *float64 `json:"prediction_confidence,omitempty"`
+	PredictionIrrigationEventsDetected *float64 `json:"prediction_irrigation_events_detected,omitempty"`
 	PredictionUnderIrrigationRiskScore *float64 `json:"prediction_under_irrigation_risk_score,omitempty"`
 	PredictionOverIrrigationRiskScore  *float64 `json:"prediction_over_irrigation_risk_score,omitempty"`
 	PredictionUniformityScore          *float64 `json:"prediction_uniformity_score,omitempty"`

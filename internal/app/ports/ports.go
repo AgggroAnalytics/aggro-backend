@@ -52,7 +52,10 @@ type OrganizationRepository interface {
 type UserRepository interface {
 	GetByEmail(ctx context.Context, email string) (*domain.User, error)
 	GetByID(ctx context.Context, id uuid.UUID) (*domain.User, error)
+	GetByUsername(ctx context.Context, username string) (*domain.User, error)
 	Create(ctx context.Context, user *domain.User) error
+	// Upsert inserts or updates by primary key (first login / concurrent requests).
+	Upsert(ctx context.Context, user *domain.User) error
 }
 
 // TileInfo is a tile identity and geometry for sending to geo-worker.
@@ -182,24 +185,22 @@ type MLResultStore interface {
 type FieldAnalyticsRepository interface {
 	UpsertFieldAnalyticsForFieldAndDate(ctx context.Context, fieldID uuid.UUID, observationDate time.Time) error
 	UpsertFieldPredictedAnalyticsForFieldAndDate(ctx context.Context, fieldID uuid.UUID, observationDate time.Time, m PredictedFieldAnalyticsMeans) error
+	DeletePredictedFieldAnalyticsByFieldID(ctx context.Context, fieldID uuid.UUID) error
 	ListFieldAnalyticsByFieldID(ctx context.Context, fieldID uuid.UUID, dateFrom, dateTo *time.Time) ([]FieldAnalyticsRow, error)
 	DeleteFieldAnalyticsByDates(ctx context.Context, fieldID uuid.UUID, dates []time.Time) error
 }
 
 // PredictedFieldAnalyticsMeans holds field-level averages of ML outputs (finalize activity).
 type PredictedFieldAnalyticsMeans struct {
-	TileCount                int32
-	HeterogeneityScore       *float64
-	DegradationScore         *float64
-	VegetationCoverLossScore *float64
-	BareSoilExpansionScore   *float64
-	HealthScore              *float64
-	StressScoreTotal         *float64
-	WaterStress              *float64
-	Confidence               *float64
-	UnderIrrigationRiskScore *float64
-	OverIrrigationRiskScore  *float64
-	UniformityScore          *float64
+	TileCount                 int32
+	DegradationScore          *float64
+	HealthScore               *float64
+	StressScoreTotal          *float64
+	WaterStress               *float64
+	VegetationActivityDrop    *float64
+	HeterogeneityGrowth       *float64
+	Confidence                *float64
+	IrrigationEventsDetected  *float64
 }
 
 // FieldAnalyticsRow is one row from field_analytics_timeseries for API.
@@ -231,7 +232,10 @@ type FieldAnalyticsRow struct {
 	PredictionHealthScore              *float64
 	PredictionStressScoreTotal         *float64
 	PredictionWaterStress              *float64
+	PredictionVegetationActivityDrop   *float64
+	PredictionHeterogeneityGrowth      *float64
 	PredictionConfidence               *float64
+	PredictionIrrigationEventsDetected *float64
 	PredictionUnderIrrigationRiskScore *float64
 	PredictionOverIrrigationRiskScore  *float64
 	PredictionUniformityScore          *float64
@@ -243,6 +247,7 @@ type AnalysisPmtilesRepository interface {
 	ListByFieldID(ctx context.Context, fieldID uuid.UUID) ([]PmtilesArtifactRow, error)
 	UpsertArtifact(ctx context.Context, fieldID uuid.UUID, analysisKind string, analysisDate time.Time, module, pmtilesURL string) error
 	DeleteArtifactsByDates(ctx context.Context, fieldID uuid.UUID, dates []time.Time) error
+	DeletePredictionArtifactsByFieldID(ctx context.Context, fieldID uuid.UUID) error
 }
 
 // PmtilesArtifactRow is one row from analysis_pmtiles_artifacts for API.

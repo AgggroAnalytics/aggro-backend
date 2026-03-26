@@ -110,16 +110,20 @@ func jsonStringsToExplanations(explanations []string) []byte {
 func (r *TilePredictionPostgres) saveDegradation(ctx context.Context, q *sqlc.Queries, id uuid.UUID, body []byte) error {
 	var p struct {
 		DegradationScore         *int     `json:"degradation_score"`
-		DegradationLevel         string  `json:"degradation_level"`
-		Trend                    string  `json:"trend"`
-		VegetationCoverLossScore *int    `json:"vegetation_cover_loss_score"`
-		BareSoilExpansionScore   *int    `json:"bare_soil_expansion_score"`
-		HeterogeneityScore      *int    `json:"heterogeneity_score"`
-		AlertLevel               string  `json:"alert_level"`
+		DegradationLevel         string   `json:"degradation_level"`
+		DegradationClass         string   `json:"degradation_class"`
+		Trend                    string   `json:"trend"`
+		VegetationCoverLossScore *int     `json:"vegetation_cover_loss_score"`
+		BareSoilExpansionScore   *int     `json:"bare_soil_expansion_score"`
+		HeterogeneityScore       *int     `json:"heterogeneity_score"`
+		AlertLevel               string   `json:"alert_level"`
 		Explanations             []string `json:"explanations"`
 	}
 	if err := json.Unmarshal(body, &p); err != nil {
 		return err
+	}
+	if p.DegradationLevel == "" {
+		p.DegradationLevel = p.DegradationClass
 	}
 	level := mapDegradationLevel(p.DegradationLevel)
 	trend := mapTrend(p.Trend)
@@ -144,7 +148,7 @@ func (r *TilePredictionPostgres) saveDegradation(ctx context.Context, q *sqlc.Qu
 		Trend:                    trend,
 		VegetationCoverLossScore: vegScore,
 		BareSoilExpansionScore:   bareScore,
-		HeterogeneityScore:      hetScore,
+		HeterogeneityScore:       hetScore,
 		AlertLevel:               alert,
 		Explanations:             jsonStringsToExplanations(p.Explanations),
 	})
@@ -152,12 +156,12 @@ func (r *TilePredictionPostgres) saveDegradation(ctx context.Context, q *sqlc.Qu
 
 func (r *TilePredictionPostgres) saveHealthStress(ctx context.Context, q *sqlc.Queries, id uuid.UUID, body []byte) error {
 	var p struct {
-		HealthScore            *int     `json:"health_score"`
-		StressScoreTotal       *int     `json:"stress_score_total"`
-		StressScores           *struct {
+		HealthScore      *int `json:"health_score"`
+		StressScoreTotal *int `json:"stress_score_total"`
+		StressScores     *struct {
 			WaterStress            *int `json:"water_stress"`
 			VegetationActivityDrop *int `json:"vegetation_activity_drop"`
-			HeterogeneityGrowth   *int `json:"heterogeneity_growth"`
+			HeterogeneityGrowth    *int `json:"heterogeneity_growth"`
 		} `json:"stress_scores"`
 		AlertLevel   string   `json:"alert_level"`
 		Trend        string   `json:"trend"`
@@ -199,16 +203,40 @@ func (r *TilePredictionPostgres) saveHealthStress(ctx context.Context, q *sqlc.Q
 
 func (r *TilePredictionPostgres) saveIrrigation(ctx context.Context, q *sqlc.Queries, id uuid.UUID, body []byte) error {
 	var p struct {
-		IsIrrigated              *bool   `json:"is_irrigated"`
+		IsIrrigated              *bool    `json:"is_irrigated"`
 		Confidence               *float64 `json:"confidence"`
-		WaterBalanceStatus       string  `json:"water_balance_status"`
-		UnderIrrigationRiskScore *int    `json:"under_irrigation_risk_score"`
-		OverIrrigationRiskScore  *int    `json:"over_irrigation_risk_score"`
-		UniformityScore          *int    `json:"uniformity_score"`
+		WaterBalanceStatus       string   `json:"water_balance_status"`
+		IrrigationStatus         string   `json:"irrigation_status"`
+		WaterBalanceRisk         string   `json:"water_balance_risk"`
+		UnderIrrigationRiskScore *int     `json:"under_irrigation_risk_score"`
+		OverIrrigationRiskScore  *int     `json:"over_irrigation_risk_score"`
+		UniformityScore          *int     `json:"uniformity_score"`
 		Explanations             []string `json:"explanations"`
 	}
 	if err := json.Unmarshal(body, &p); err != nil {
 		return err
+	}
+	if p.IsIrrigated == nil {
+		switch p.IrrigationStatus {
+		case "irrigated":
+			v := true
+			p.IsIrrigated = &v
+		case "rainfed":
+			v := false
+			p.IsIrrigated = &v
+		}
+	}
+	if p.WaterBalanceStatus == "" {
+		switch p.WaterBalanceRisk {
+		case "high", "critical":
+			p.WaterBalanceStatus = "under_irrigation_risk"
+		default:
+			if p.IrrigationStatus == "unknown" {
+				p.WaterBalanceStatus = "unknown"
+			} else {
+				p.WaterBalanceStatus = "balanced"
+			}
+		}
 	}
 	var isIrrigated pgtype.Bool
 	if p.IsIrrigated != nil {

@@ -174,11 +174,15 @@ func Apply(ctx context.Context, d Deps, req *FieldProcessingCompleteRequest) (*R
 		}
 
 		predMeans, mlUsable := AggregateMLResults(req.MLResults)
+		// Одна строка predicted на поле: агрегат ML не привязан к каждой дате наблюдения (дата = «на сейчас» / as-of).
 		if mlUsable > 0 && d.FieldAnalyticsRepo != nil {
 			predMeans.TileCount = int32(mlUsable)
-			for obsDate := range datesSeen {
-				if err := d.FieldAnalyticsRepo.UpsertFieldPredictedAnalyticsForFieldAndDate(txCtx, fieldID, obsDate, predMeans); err != nil {
-					return fmt.Errorf("field predicted analytics %s: %w", obsDate.Format("2006-01-02"), err)
+			if predRef, ok := maxDateInSet(datesSeen); ok {
+				if err := d.FieldAnalyticsRepo.DeletePredictedFieldAnalyticsByFieldID(txCtx, fieldID); err != nil {
+					return fmt.Errorf("delete predicted analytics: %w", err)
+				}
+				if err := d.FieldAnalyticsRepo.UpsertFieldPredictedAnalyticsForFieldAndDate(txCtx, fieldID, predRef, predMeans); err != nil {
+					return fmt.Errorf("field predicted analytics: %w", err)
 				}
 				res.FieldPredictedAnalyticsDates++
 			}
@@ -211,6 +215,11 @@ func Apply(ctx context.Context, d Deps, req *FieldProcessingCompleteRequest) (*R
 			}
 			res.PmtilesUpserted++
 		}
+		if d.PmtilesRepo != nil {
+			if err := d.PmtilesRepo.DeletePredictionArtifactsByFieldID(txCtx, fieldID); err != nil {
+				return fmt.Errorf("delete prediction pmtiles: %w", err)
+			}
+		}
 		for _, row := range req.PredictedPmtilesURLs {
 			dt, err := time.Parse("2006-01-02", row.Date)
 			if err != nil || row.URL == "" {
@@ -227,6 +236,18 @@ func Apply(ctx context.Context, d Deps, req *FieldProcessingCompleteRequest) (*R
 		return nil, err
 	}
 	return res, nil
+}
+
+func maxDateInSet(dates map[time.Time]struct{}) (time.Time, bool) {
+	var max time.Time
+	first := true
+	for d := range dates {
+		if first || d.After(max) {
+			max = d
+			first = false
+		}
+	}
+	return max, !first
 }
 
 func geometryToPolygonWKB(geojsonBytes json.RawMessage) ([]byte, error) {
