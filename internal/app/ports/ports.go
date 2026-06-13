@@ -3,10 +3,10 @@ package ports
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"time"
 
 	"github.com/AgggroAnalytics/aggro-backend/internal/app/domain"
-	"github.com/AgggroAnalytics/aggro-backend/internal/app/outbox"
 	"github.com/google/uuid"
 )
 
@@ -27,13 +27,18 @@ type FieldRepository interface {
 
 // FieldListItem is a field row for list (includes coordinates as number[][][]).
 type FieldListItem struct {
-	ID             uuid.UUID
-	Name           string
-	Description    string
-	CreatedAt      time.Time
-	AreaHectares   *float64
-	OrganizationID uuid.UUID
-	Coordinates    domain.Polygon
+	ID                     uuid.UUID
+	Name                   string
+	Description            string
+	CreatedAt              time.Time
+	AreaHectares           *float64
+	OrganizationID         uuid.UUID
+	Coordinates            domain.Polygon
+	TileCount              int32
+	SeasonCount            int32
+	LatestObservationAt    *time.Time
+	ObservedAnalyticsDates int32
+	PmtilesLayerCount      int32
 }
 
 // OrganizationListItem is a row for list APIs.
@@ -42,10 +47,96 @@ type OrganizationListItem struct {
 	Name string
 }
 
+// OrganizationMember is a user row with role in an organization.
+type OrganizationMember struct {
+	UserID      uuid.UUID
+	Username    string
+	Email       string
+	FirstName   string
+	LastName    string
+	Role        domain.UserRole
+	MemberSince time.Time
+}
+
 type OrganizationRepository interface {
 	ListForUser(ctx context.Context, userID uuid.UUID) ([]OrganizationListItem, error)
 	CreateOrganization(ctx context.Context, organization *domain.Organization) error
 	AddMember(ctx context.Context, organizationID uuid.UUID, userID uuid.UUID, role domain.UserRole) error
+	UpsertMember(ctx context.Context, organizationID uuid.UUID, userID uuid.UUID, role domain.UserRole) error
+	ListMembers(ctx context.Context, organizationID uuid.UUID) ([]OrganizationMember, error)
+	GetUserRoleInOrganization(ctx context.Context, userID, organizationID uuid.UUID) (role domain.UserRole, ok bool, err error)
+	UpdateMemberRole(ctx context.Context, organizationID, targetUserID uuid.UUID, role domain.UserRole) error
+	RemoveMember(ctx context.Context, organizationID, targetUserID uuid.UUID) error
+	OrganizationCreatedBy(ctx context.Context, organizationID uuid.UUID) (uuid.UUID, error)
+	// SeasonTargets is a JSON object (e.g. ndvi_target, health_score_target, notes); empty object if unset.
+	GetSeasonTargets(ctx context.Context, organizationID uuid.UUID) (json.RawMessage, error)
+	UpdateSeasonTargets(ctx context.Context, organizationID uuid.UUID, targets json.RawMessage) error
+}
+
+// FieldAuditEntry is one audit row for a field.
+type FieldAuditEntry struct {
+	ID          uuid.UUID
+	FieldID     uuid.UUID
+	ActorUserID uuid.UUID
+	Action      string
+	Payload     json.RawMessage
+	CreatedAt   time.Time
+}
+
+type FieldAuditRepository interface {
+	Insert(ctx context.Context, fieldID, actorUserID uuid.UUID, action string, payload json.RawMessage) error
+	ListByFieldID(ctx context.Context, fieldID uuid.UUID, limit int) ([]FieldAuditEntry, error)
+	ListByOrganizationID(ctx context.Context, organizationID uuid.UUID, limit int) ([]FieldAuditOrgEntry, error)
+}
+
+// FieldAuditOrgEntry is an audit row with field name for org-wide feeds.
+type FieldAuditOrgEntry struct {
+	FieldAuditEntry
+	FieldName string
+}
+
+// OrgDashboardRepository aggregates SQL for the organization home dashboard.
+type OrgDashboardRepository interface {
+	Stats(ctx context.Context, organizationID uuid.UUID) (OrgDashboardStats, error)
+	ObservedNdviWeekly(ctx context.Context, organizationID uuid.UUID) ([]OrgNdviWeekPoint, error)
+	StaleFields(ctx context.Context, organizationID uuid.UUID, limit int32) ([]OrgStaleFieldRow, error)
+	FieldsCentroidWGS84(ctx context.Context, organizationID uuid.UUID) (lon, lat *float64, err error)
+}
+
+type OrgDashboardStats struct {
+	FieldCount                  int32
+	TotalAreaHa                 float64
+	FieldsWithObservedAnalytics int32
+	MemberCount                 int32
+}
+
+type OrgNdviWeekPoint struct {
+	WeekStart   time.Time
+	NdviMeanAvg float64
+}
+
+type OrgStaleFieldRow struct {
+	FieldID         uuid.UUID
+	Name            string
+	LastAnalyticsAt *time.Time
+	TileCount       int32
+}
+
+// UserPreferences is persisted UI / profile settings (IdP fields stay in JWT).
+type UserPreferences struct {
+	UserID            uuid.UUID
+	Locale            string
+	Timezone          string
+	AvatarURL         string
+	UnitsSystem       string
+	DateFormat        string
+	FieldsDefaultYear *int32
+	UpdatedAt         time.Time
+}
+
+type UserPreferencesRepository interface {
+	Get(ctx context.Context, userID uuid.UUID) (*UserPreferences, error)
+	Upsert(ctx context.Context, p *UserPreferences) error
 }
 
 // UserRepository resolves users (e.g. by email for invites) and creates them on first login.
@@ -71,6 +162,7 @@ type TileRepository interface {
 	ListTilesByFieldID(ctx context.Context, fieldID uuid.UUID) ([]TileInfo, error)
 	ListTileIDsByFieldID(ctx context.Context, fieldID uuid.UUID) ([]uuid.UUID, error)
 	ListTilesGeoJSONByFieldID(ctx context.Context, fieldID uuid.UUID) ([]TileGeoJSONRow, error)
+	GetFieldIDByTileID(ctx context.Context, tileID uuid.UUID) (uuid.UUID, error)
 }
 
 type TileGeoJSONRow struct {
@@ -104,15 +196,6 @@ type SeasonRepository interface {
 
 type Transactor interface {
 	WithinTransaction(ctx context.Context, fn func(ctx context.Context) error) error
-}
-
-type Publisher interface {
-	Publish(ctx context.Context, message outbox.OutboxEvent) error
-}
-
-// TilesPublisher sends a tile-job request (field_id + field_geom GeoJSON) to the tile-worker.
-type TilesPublisher interface {
-	PublishTileRequest(ctx context.Context, body []byte, replyTo, correlationID string) error
 }
 
 // TileMetricsReader returns observed timeseries and ML predictions for a tile (for tooltip).
@@ -261,7 +344,3 @@ type PmtilesArtifactRow struct {
 	CreatedAt    time.Time
 }
 
-// PmtilesBuildPublisher sends "build PMTiles" job to the pmtiles-worker queue.
-type PmtilesBuildPublisher interface {
-	PublishBuildJob(ctx context.Context, fieldID uuid.UUID, analysisKind string, analysisDate time.Time, module string) error
-}

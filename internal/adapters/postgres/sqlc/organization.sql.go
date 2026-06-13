@@ -40,6 +40,45 @@ func (q *Queries) CreateOrganization(ctx context.Context, arg CreateOrganization
 	return id, err
 }
 
+const getOrganizationCreatedBy = `-- name: GetOrganizationCreatedBy :one
+SELECT created_by FROM organizations WHERE id = $1
+`
+
+func (q *Queries) GetOrganizationCreatedBy(ctx context.Context, id uuid.UUID) (uuid.UUID, error) {
+	row := q.db.QueryRow(ctx, getOrganizationCreatedBy, id)
+	var created_by uuid.UUID
+	err := row.Scan(&created_by)
+	return created_by, err
+}
+
+const getOrganizationMemberRole = `-- name: GetOrganizationMemberRole :one
+SELECT role FROM organization_members
+WHERE organization_id = $1 AND user_id = $2
+`
+
+type GetOrganizationMemberRoleParams struct {
+	OrganizationID uuid.UUID `json:"organization_id"`
+	UserID         uuid.UUID `json:"user_id"`
+}
+
+func (q *Queries) GetOrganizationMemberRole(ctx context.Context, arg GetOrganizationMemberRoleParams) (UserRole, error) {
+	row := q.db.QueryRow(ctx, getOrganizationMemberRole, arg.OrganizationID, arg.UserID)
+	var role UserRole
+	err := row.Scan(&role)
+	return role, err
+}
+
+const getOrganizationSeasonTargets = `-- name: GetOrganizationSeasonTargets :one
+SELECT season_targets FROM organizations WHERE id = $1
+`
+
+func (q *Queries) GetOrganizationSeasonTargets(ctx context.Context, id uuid.UUID) ([]byte, error) {
+	row := q.db.QueryRow(ctx, getOrganizationSeasonTargets, id)
+	var season_targets []byte
+	err := row.Scan(&season_targets)
+	return season_targets, err
+}
+
 const inviteMemberToOrganization = `-- name: InviteMemberToOrganization :exec
 INSERT INTO organization_members(
   organization_id,
@@ -64,6 +103,59 @@ func (q *Queries) InviteMemberToOrganization(ctx context.Context, arg InviteMemb
 		arg.CreatedAt,
 	)
 	return err
+}
+
+const listOrganizationMembers = `-- name: ListOrganizationMembers :many
+SELECT
+  u.id AS user_id,
+  u.username,
+  u.email,
+  u.first_name,
+  u.last_name,
+  m.role,
+  m.created_at AS member_since
+FROM organization_members m
+JOIN users u ON u.id = m.user_id
+WHERE m.organization_id = $1
+ORDER BY u.username
+`
+
+type ListOrganizationMembersRow struct {
+	UserID      uuid.UUID          `json:"user_id"`
+	Username    string             `json:"username"`
+	Email       string             `json:"email"`
+	FirstName   string             `json:"first_name"`
+	LastName    string             `json:"last_name"`
+	Role        UserRole           `json:"role"`
+	MemberSince pgtype.Timestamptz `json:"member_since"`
+}
+
+func (q *Queries) ListOrganizationMembers(ctx context.Context, organizationID uuid.UUID) ([]ListOrganizationMembersRow, error) {
+	rows, err := q.db.Query(ctx, listOrganizationMembers, organizationID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListOrganizationMembersRow
+	for rows.Next() {
+		var i ListOrganizationMembersRow
+		if err := rows.Scan(
+			&i.UserID,
+			&i.Username,
+			&i.Email,
+			&i.FirstName,
+			&i.LastName,
+			&i.Role,
+			&i.MemberSince,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const listOrganizationsForUser = `-- name: ListOrganizationsForUser :many
@@ -100,4 +192,74 @@ func (q *Queries) ListOrganizationsForUser(ctx context.Context, userID uuid.UUID
 		return nil, err
 	}
 	return items, nil
+}
+
+const removeOrganizationMember = `-- name: RemoveOrganizationMember :exec
+DELETE FROM organization_members
+WHERE organization_id = $1 AND user_id = $2
+`
+
+type RemoveOrganizationMemberParams struct {
+	OrganizationID uuid.UUID `json:"organization_id"`
+	UserID         uuid.UUID `json:"user_id"`
+}
+
+func (q *Queries) RemoveOrganizationMember(ctx context.Context, arg RemoveOrganizationMemberParams) error {
+	_, err := q.db.Exec(ctx, removeOrganizationMember, arg.OrganizationID, arg.UserID)
+	return err
+}
+
+const updateOrganizationMemberRole = `-- name: UpdateOrganizationMemberRole :exec
+UPDATE organization_members SET role = $3
+WHERE organization_id = $1 AND user_id = $2
+`
+
+type UpdateOrganizationMemberRoleParams struct {
+	OrganizationID uuid.UUID `json:"organization_id"`
+	UserID         uuid.UUID `json:"user_id"`
+	Role           UserRole  `json:"role"`
+}
+
+func (q *Queries) UpdateOrganizationMemberRole(ctx context.Context, arg UpdateOrganizationMemberRoleParams) error {
+	_, err := q.db.Exec(ctx, updateOrganizationMemberRole, arg.OrganizationID, arg.UserID, arg.Role)
+	return err
+}
+
+const updateOrganizationSeasonTargets = `-- name: UpdateOrganizationSeasonTargets :exec
+UPDATE organizations
+SET season_targets = $1::jsonb
+WHERE id = $2
+`
+
+type UpdateOrganizationSeasonTargetsParams struct {
+	SeasonTargets []byte    `json:"season_targets"`
+	ID            uuid.UUID `json:"id"`
+}
+
+func (q *Queries) UpdateOrganizationSeasonTargets(ctx context.Context, arg UpdateOrganizationSeasonTargetsParams) error {
+	_, err := q.db.Exec(ctx, updateOrganizationSeasonTargets, arg.SeasonTargets, arg.ID)
+	return err
+}
+
+const upsertOrganizationMember = `-- name: UpsertOrganizationMember :exec
+INSERT INTO organization_members (organization_id, user_id, role, created_at)
+VALUES ($1, $2, $3, $4)
+ON CONFLICT (organization_id, user_id) DO UPDATE SET role = EXCLUDED.role
+`
+
+type UpsertOrganizationMemberParams struct {
+	OrganizationID uuid.UUID          `json:"organization_id"`
+	UserID         uuid.UUID          `json:"user_id"`
+	Role           UserRole           `json:"role"`
+	CreatedAt      pgtype.Timestamptz `json:"created_at"`
+}
+
+func (q *Queries) UpsertOrganizationMember(ctx context.Context, arg UpsertOrganizationMemberParams) error {
+	_, err := q.db.Exec(ctx, upsertOrganizationMember,
+		arg.OrganizationID,
+		arg.UserID,
+		arg.Role,
+		arg.CreatedAt,
+	)
+	return err
 }

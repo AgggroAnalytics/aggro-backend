@@ -1,6 +1,6 @@
 # aggro-backend
 
-Go service: HTTP API (fields, seasons, orgs, analytics), Postgres, RabbitMQ (legacy tile/geo/ML paths).
+Go service: HTTP API (fields, seasons, orgs, analytics), Postgres, Temporal client for field workflows.
 
 ## Temporal worker (field processing → DB)
 

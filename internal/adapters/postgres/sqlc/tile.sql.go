@@ -43,6 +43,17 @@ func (q *Queries) DeleteTilesByFieldID(ctx context.Context, fieldID uuid.UUID) e
 	return err
 }
 
+const getTileFieldID = `-- name: GetTileFieldID :one
+SELECT field_id FROM tiles WHERE id = $1
+`
+
+func (q *Queries) GetTileFieldID(ctx context.Context, id uuid.UUID) (uuid.UUID, error) {
+	row := q.db.QueryRow(ctx, getTileFieldID, id)
+	var field_id uuid.UUID
+	err := row.Scan(&field_id)
+	return field_id, err
+}
+
 const insertTileWithID = `-- name: InsertTileWithID :exec
 INSERT INTO tiles (id, field_id, geometry)
 VALUES (

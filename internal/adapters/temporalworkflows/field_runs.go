@@ -25,14 +25,16 @@ func FieldWorkflowID(fieldID uuid.UUID) string {
 
 // FieldRunSummary is a lightweight status for one execution (no history payload).
 type FieldRunSummary struct {
-	WorkflowID   string   `json:"workflow_id"`
-	RunID        string   `json:"run_id"`
-	Status       string   `json:"status"`
-	Stage        string   `json:"stage"`
-	StageLabel   string   `json:"stage_label"`
-	ActiveStages []string `json:"active_stages,omitempty"`
-	StartedAt    *string  `json:"started_at,omitempty"`
-	ClosedAt     *string  `json:"closed_at,omitempty"`
+	WorkflowID      string   `json:"workflow_id"`
+	RunID           string   `json:"run_id"`
+	Status          string   `json:"status"`
+	Stage           string   `json:"stage"`
+	StageLabel      string   `json:"stage_label"`
+	ActiveStages    []string `json:"active_stages,omitempty"`
+	StartedAt       *string  `json:"started_at,omitempty"`
+	ClosedAt        *string  `json:"closed_at,omitempty"`
+	DurationSeconds *int64   `json:"duration_seconds,omitempty"`
+	FailureMessage  *string  `json:"failure_message,omitempty"`
 }
 
 var stageLabels = map[string]string{
@@ -167,6 +169,12 @@ func (l *Lister) ListFieldProcessingRuns(ctx context.Context, fieldID uuid.UUID)
 			t := ex.CloseTime.AsTime().UTC().Format(time.RFC3339)
 			sum.ClosedAt = &t
 		}
+		if ex.StartTime != nil && ex.CloseTime != nil {
+			sec := int64(ex.CloseTime.AsTime().Sub(ex.StartTime.AsTime()).Seconds())
+			if sec >= 0 {
+				sum.DurationSeconds = &sec
+			}
+		}
 
 		switch ex.Status {
 		case enumspb.WORKFLOW_EXECUTION_STATUS_COMPLETED:
@@ -175,6 +183,11 @@ func (l *Lister) ListFieldProcessingRuns(ctx context.Context, fieldID uuid.UUID)
 		case enumspb.WORKFLOW_EXECUTION_STATUS_FAILED:
 			sum.Stage = "failed"
 			sum.StageLabel = stageLabels["failed"]
+			if l.Client != nil && ex.Execution != nil {
+				if msg := WorkflowFailureMessage(ctx, l.Client, ex.Execution.WorkflowId, ex.Execution.RunId); msg != "" {
+					sum.FailureMessage = &msg
+				}
+			}
 		case enumspb.WORKFLOW_EXECUTION_STATUS_TERMINATED:
 			sum.Stage = "terminated"
 			sum.StageLabel = stageLabels["terminated"]

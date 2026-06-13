@@ -19,3 +19,16 @@ func MapDomainRoleToPGRole(role domain.UserRole) sqlc.UserRole {
 		return sqlc.UserRoleViewer
 	}
 }
+
+func MapPGRoleToDomain(role sqlc.UserRole) domain.UserRole {
+	switch role {
+	case sqlc.UserRoleAdmin:
+		return domain.UserRoleAdmin
+	case sqlc.UserRoleManager:
+		return domain.UserRoleManager
+	case sqlc.UserRoleFarmer:
+		return domain.UserRoleFarmer
+	default:
+		return domain.UserRoleViewer
+	}
+}

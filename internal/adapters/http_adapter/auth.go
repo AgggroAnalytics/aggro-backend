@@ -28,6 +28,8 @@ type AuthClaims struct {
 	Email             string
 	GivenName         string
 	FamilyName        string
+	// RealmRoles from token realm_access.roles (optional; DB roles remain authoritative for API RBAC).
+	RealmRoles []string
 }
 
 // AuthMiddleware validates Keycloak JWT and sets subject + full claims in context. If issuer is empty, no auth.
@@ -96,6 +98,9 @@ func AuthMiddleware(issuer, jwksURI string, next http.Handler) http.Handler {
 			Email             string `json:"email"`
 			GivenName         string `json:"given_name"`
 			FamilyName        string `json:"family_name"`
+			RealmAccess       *struct {
+				Roles []string `json:"roles"`
+			} `json:"realm_access"`
 		}
 		if err := idToken.Claims(&claims); err != nil {
 			http.Error(w, `{"error":"invalid claims"}`, http.StatusUnauthorized)
@@ -107,6 +112,9 @@ func AuthMiddleware(issuer, jwksURI string, next http.Handler) http.Handler {
 			Email:             claims.Email,
 			GivenName:         claims.GivenName,
 			FamilyName:        claims.FamilyName,
+		}
+		if claims.RealmAccess != nil {
+			authClaims.RealmRoles = claims.RealmAccess.Roles
 		}
 		ctx := r.Context()
 		ctx = context.WithValue(ctx, SubjectContextKey, claims.Sub)

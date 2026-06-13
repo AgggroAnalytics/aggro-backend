@@ -125,14 +125,24 @@ func (r *FieldsPostgres) ListFieldsByOrganizationID(ctx context.Context, organiz
 				coords = geomapping.GeomPolygonToDomain(g)
 			}
 		}
+		var latestObs *time.Time
+		if row.LatestObservationAt.Valid {
+			t := row.LatestObservationAt.Time
+			latestObs = &t
+		}
 		out = append(out, ports.FieldListItem{
-			ID:             row.ID,
-			Name:           row.Name,
-			Description:    desc,
-			CreatedAt:      timeFromPg(row.CreatedAt),
-			AreaHectares:   area,
-			OrganizationID: row.OrganizationID,
-			Coordinates:    coords,
+			ID:                     row.ID,
+			Name:                   row.Name,
+			Description:            desc,
+			CreatedAt:              timeFromPg(row.CreatedAt),
+			AreaHectares:           area,
+			OrganizationID:         row.OrganizationID,
+			Coordinates:            coords,
+			TileCount:              row.TileCount,
+			SeasonCount:            row.SeasonCount,
+			LatestObservationAt:    latestObs,
+			ObservedAnalyticsDates: row.ObservedAnalyticsDates,
+			PmtilesLayerCount:      row.PmtilesLayerCount,
 		})
 	}
 	return out, nil

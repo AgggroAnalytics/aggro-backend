@@ -2,14 +2,16 @@ package postgres
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"time"
 
-	pgmapping 	"github.com/AgggroAnalytics/aggro-backend/internal/adapters/postgres/mapping"
+	pgmapping "github.com/AgggroAnalytics/aggro-backend/internal/adapters/postgres/mapping"
 	"github.com/AgggroAnalytics/aggro-backend/internal/adapters/postgres/sqlc"
 	"github.com/AgggroAnalytics/aggro-backend/internal/app/domain"
 	"github.com/AgggroAnalytics/aggro-backend/internal/app/ports"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -87,4 +89,114 @@ func (r *OrganizationsPostgres) AddMember(ctx context.Context, organizationID uu
 	err := q.InviteMemberToOrganization(ctx, params)
 
 	return err
+}
+
+func (r *OrganizationsPostgres) UpsertMember(ctx context.Context, organizationID uuid.UUID, userID uuid.UUID, role domain.UserRole) error {
+	q := r.queries(ctx)
+	createdAt := pgtype.Timestamptz{Time: time.Now(), Valid: true}
+	return q.UpsertOrganizationMember(ctx, sqlc.UpsertOrganizationMemberParams{
+		OrganizationID: organizationID,
+		UserID:         userID,
+		Role:           pgmapping.MapDomainRoleToPGRole(role),
+		CreatedAt:      createdAt,
+	})
+}
+
+func (r *OrganizationsPostgres) ListMembers(ctx context.Context, organizationID uuid.UUID) ([]ports.OrganizationMember, error) {
+	rows, err := r.queries(ctx).ListOrganizationMembers(ctx, organizationID)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]ports.OrganizationMember, 0, len(rows))
+	for _, row := range rows {
+		var ms time.Time
+		if row.MemberSince.Valid {
+			ms = row.MemberSince.Time
+		}
+		out = append(out, ports.OrganizationMember{
+			UserID:      row.UserID,
+			Username:    row.Username,
+			Email:       row.Email,
+			FirstName:   row.FirstName,
+			LastName:    row.LastName,
+			Role:        pgmapping.MapPGRoleToDomain(row.Role),
+			MemberSince: ms,
+		})
+	}
+	return out, nil
+}
+
+func (r *OrganizationsPostgres) GetUserRoleInOrganization(ctx context.Context, userID, organizationID uuid.UUID) (domain.UserRole, bool, error) {
+	q := r.queries(ctx)
+	createdBy, err := q.GetOrganizationCreatedBy(ctx, organizationID)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return "", false, nil
+		}
+		return "", false, err
+	}
+	if createdBy == userID {
+		return domain.UserRoleAdmin, true, nil
+	}
+	pgRole, err := q.GetOrganizationMemberRole(ctx, sqlc.GetOrganizationMemberRoleParams{
+		OrganizationID: organizationID,
+		UserID:         userID,
+	})
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return "", false, nil
+		}
+		return "", false, err
+	}
+	return pgmapping.MapPGRoleToDomain(pgRole), true, nil
+}
+
+func (r *OrganizationsPostgres) UpdateMemberRole(ctx context.Context, organizationID, targetUserID uuid.UUID, role domain.UserRole) error {
+	return r.queries(ctx).UpdateOrganizationMemberRole(ctx, sqlc.UpdateOrganizationMemberRoleParams{
+		OrganizationID: organizationID,
+		UserID:         targetUserID,
+		Role:           pgmapping.MapDomainRoleToPGRole(role),
+	})
+}
+
+func (r *OrganizationsPostgres) RemoveMember(ctx context.Context, organizationID, targetUserID uuid.UUID) error {
+	return r.queries(ctx).RemoveOrganizationMember(ctx, sqlc.RemoveOrganizationMemberParams{
+		OrganizationID: organizationID,
+		UserID:         targetUserID,
+	})
+}
+
+func (r *OrganizationsPostgres) OrganizationCreatedBy(ctx context.Context, organizationID uuid.UUID) (uuid.UUID, error) {
+	return r.queries(ctx).GetOrganizationCreatedBy(ctx, organizationID)
+}
+
+func (r *OrganizationsPostgres) GetSeasonTargets(ctx context.Context, organizationID uuid.UUID) (json.RawMessage, error) {
+	b, err := r.queries(ctx).GetOrganizationSeasonTargets(ctx, organizationID)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return json.RawMessage(`{}`), nil
+		}
+		return nil, err
+	}
+	if len(b) == 0 {
+		return json.RawMessage(`{}`), nil
+	}
+	return json.RawMessage(b), nil
+}
+
+func (r *OrganizationsPostgres) UpdateSeasonTargets(ctx context.Context, organizationID uuid.UUID, targets json.RawMessage) error {
+	if len(targets) == 0 {
+		targets = json.RawMessage(`{}`)
+	}
+	if len(targets) > 16384 {
+		return errors.New("season_targets too large")
+	}
+	var tmp map[string]json.RawMessage
+	if err := json.Unmarshal(targets, &tmp); err != nil {
+		return err
+	}
+	return r.queries(ctx).UpdateOrganizationSeasonTargets(ctx, sqlc.UpdateOrganizationSeasonTargetsParams{
+		ID:            organizationID,
+		SeasonTargets: []byte(targets),
+	})
 }

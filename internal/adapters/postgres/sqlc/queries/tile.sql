@@ -7,6 +7,9 @@ VALUES (
 )
 RETURNING id;
 
+-- name: GetTileFieldID :one
+SELECT field_id FROM tiles WHERE id = sqlc.arg(id);
+
 -- name: ListTilesByFieldID :many
 SELECT id, field_id, geometry
 FROM tiles

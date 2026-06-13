@@ -92,20 +92,42 @@ func (q *Queries) GetFieldByID(ctx context.Context, id uuid.UUID) (GetFieldByIDR
 }
 
 const listFieldsByOrganizationID = `-- name: ListFieldsByOrganizationID :many
-SELECT id, name, description, created_at, ST_AsBinary(geometry)::bytea AS geometry_wkb, area_hectares, organization_id
-FROM fields
-WHERE organization_id = $1
-ORDER BY created_at DESC
+SELECT
+  f.id,
+  f.name,
+  f.description,
+  f.created_at,
+  ST_AsBinary(f.geometry)::bytea AS geometry_wkb,
+  f.area_hectares,
+  f.organization_id,
+  COALESCE((SELECT COUNT(*) FROM tiles t WHERE t.field_id = f.id), 0)::int AS tile_count,
+  COALESCE((SELECT COUNT(*) FROM seasons s WHERE s.field_id = f.id), 0)::int AS season_count,
+  (SELECT MAX(tt.observation_date) FROM tile_timeseries tt
+    INNER JOIN tiles t ON t.id = tt.tile_id AND t.field_id = f.id)::timestamptz AS latest_observation_at,
+  COALESCE((
+    SELECT COUNT(DISTINCT fa.observation_date)
+    FROM field_analytics_timeseries fa
+    WHERE fa.field_id = f.id AND fa.source = 'observed'::analytics_source
+  ), 0)::int AS observed_analytics_dates,
+  COALESCE((SELECT COUNT(*) FROM analysis_pmtiles_artifacts apa WHERE apa.field_id = f.id), 0)::int AS pmtiles_layer_count
+FROM fields f
+WHERE f.organization_id = $1
+ORDER BY f.created_at DESC
 `
 
 type ListFieldsByOrganizationIDRow struct {
-	ID             uuid.UUID          `json:"id"`
-	Name           string             `json:"name"`
-	Description    pgtype.Text        `json:"description"`
-	CreatedAt      pgtype.Timestamptz `json:"created_at"`
-	GeometryWkb    []byte             `json:"geometry_wkb"`
-	AreaHectares   pgtype.Numeric     `json:"area_hectares"`
-	OrganizationID uuid.UUID          `json:"organization_id"`
+	ID                     uuid.UUID          `json:"id"`
+	Name                   string             `json:"name"`
+	Description            pgtype.Text        `json:"description"`
+	CreatedAt              pgtype.Timestamptz `json:"created_at"`
+	GeometryWkb            []byte             `json:"geometry_wkb"`
+	AreaHectares           pgtype.Numeric     `json:"area_hectares"`
+	OrganizationID         uuid.UUID          `json:"organization_id"`
+	TileCount              int32              `json:"tile_count"`
+	SeasonCount            int32              `json:"season_count"`
+	LatestObservationAt    pgtype.Timestamptz `json:"latest_observation_at"`
+	ObservedAnalyticsDates int32              `json:"observed_analytics_dates"`
+	PmtilesLayerCount      int32              `json:"pmtiles_layer_count"`
 }
 
 func (q *Queries) ListFieldsByOrganizationID(ctx context.Context, organizationID uuid.UUID) ([]ListFieldsByOrganizationIDRow, error) {
@@ -125,6 +147,11 @@ func (q *Queries) ListFieldsByOrganizationID(ctx context.Context, organizationID
 			&i.GeometryWkb,
 			&i.AreaHectares,
 			&i.OrganizationID,
+			&i.TileCount,
+			&i.SeasonCount,
+			&i.LatestObservationAt,
+			&i.ObservedAnalyticsDates,
+			&i.PmtilesLayerCount,
 		); err != nil {
 			return nil, err
 		}

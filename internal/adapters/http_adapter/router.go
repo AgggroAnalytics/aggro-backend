@@ -35,12 +35,13 @@ type RouterDeps struct {
 	FieldAnalyticsRepo ports.FieldAnalyticsRepository
 	PmtilesRepo        ports.AnalysisPmtilesRepository
 	TileRepo           ports.TileRepository
-	PmtilesBuild       ports.PmtilesBuildPublisher
 	OrganizationRepo   ports.OrganizationRepository
+	OrgDashboard       ports.OrgDashboardRepository
 	UserRepo           ports.UserRepository
+	FieldAuditRepo     ports.FieldAuditRepository
+	UserPrefsRepo      ports.UserPreferencesRepository
 	TileMetricsReader  ports.TileMetricsReader
 	TileTsRepo         ports.TileTimeseriesRepository
-	MLPublisher        MLPublisher
 	S3Client           *s3.Client
 	S3Bucket           string
 	// TemporalFieldWorkflows lists FieldProcessingWorkflow runs (optional).
@@ -73,7 +74,7 @@ func NewRouter(d *RouterDeps) http.Handler {
 	// Fields
 	mux.HandleFunc("GET /fields", h.listFields)
 	mux.HandleFunc("GET /fields/{id}", h.getField)
-	mux.HandleFunc("POST /fields", handleCreateField(d.FieldUC))
+	mux.HandleFunc("POST /fields", h.createField)
 	mux.HandleFunc("PUT /fields/{id}", h.updateField)
 	mux.HandleFunc("DELETE /fields/{id}", h.deleteField)
 	mux.HandleFunc("GET /fields/{id}/analytics", h.getFieldAnalytics)
@@ -82,8 +83,10 @@ func NewRouter(d *RouterDeps) http.Handler {
 	mux.HandleFunc("GET /fields/{id}/processing-dates", h.getFieldProcessingDates)
 	mux.HandleFunc("POST /fields/{id}/results/delete", h.deleteFieldResultsByDates)
 	mux.HandleFunc("GET /fields/{id}/tiles", h.getFieldTiles)
-	mux.HandleFunc("POST /fields/{id}/analytics-jobs", h.postFieldAnalyticsJobs)
-	mux.HandleFunc("POST /fields/{id}/build-pmtiles", h.postBuildPmtiles)
+	mux.HandleFunc("GET /fields/{id}/audit", h.getFieldAudit)
+	mux.HandleFunc("GET /fields/{id}/export", h.exportField)
+	mux.HandleFunc("GET /fields/{id}/workflows/{runId}/failure", h.getFieldWorkflowFailure)
+	mux.HandleFunc("POST /fields/{id}/workflows/{runId}/terminate", h.terminateFieldWorkflow)
 
 	// Seasons
 	mux.HandleFunc("GET /seasons", h.listSeasons)
@@ -96,6 +99,17 @@ func NewRouter(d *RouterDeps) http.Handler {
 	mux.HandleFunc("GET /organizations", h.listOrganizations)
 	mux.HandleFunc("POST /organizations", h.createOrganization)
 	mux.HandleFunc("POST /organizations/{id}/invite", h.inviteToOrganization)
+	mux.HandleFunc("GET /organizations/{id}/members", h.listOrganizationMembers)
+	mux.HandleFunc("PATCH /organizations/{id}/members/{userId}", h.patchOrganizationMember)
+	mux.HandleFunc("DELETE /organizations/{id}/members/{userId}", h.deleteOrganizationMember)
+	mux.HandleFunc("GET /organizations/{id}/field-workflow-runs", h.listOrganizationFieldWorkflowRuns)
+	mux.HandleFunc("GET /organizations/{id}/dashboard", h.getOrganizationDashboard)
+	mux.HandleFunc("GET /organizations/{id}/audit-log", h.getOrganizationAuditLog)
+	mux.HandleFunc("PATCH /organizations/{id}/season-targets", h.patchOrganizationSeasonTargets)
+	mux.HandleFunc("GET /organizations/{id}/weather", h.getOrganizationWeather)
+
+	mux.HandleFunc("GET /users/me", h.getMe)
+	mux.HandleFunc("PATCH /users/me/preferences", h.patchMyPreferences)
 
 	// Tiles (metrics for tooltip)
 	mux.HandleFunc("GET /tiles/{id}/metrics", h.getTileMetrics)
@@ -208,6 +222,9 @@ func (h *handlers) listFields(w http.ResponseWriter, r *http.Request) {
 		h.writeErr(w, http.StatusBadRequest, "invalid organization_id")
 		return
 	}
+	if !h.ensureOrgRole(w, r, orgID, domain.UserRoleViewer) {
+		return
+	}
 	list, err := h.d.FieldRepo.ListFieldsByOrganizationID(r.Context(), orgID)
 	if err != nil {
 		h.writeErr(w, http.StatusInternalServerError, err.Error())
@@ -220,27 +237,41 @@ func (h *handlers) listFields(w http.ResponseWriter, r *http.Request) {
 			a := *f.AreaHectares
 			area = &a
 		}
-		items = append(items, fieldListItemJSON{
-			ID:             f.ID.String(),
-			Name:           f.Name,
-			Description:    f.Description,
-			CreatedAt:      f.CreatedAt.Format(time.RFC3339),
-			AreaHectares:   area,
-			OrganizationID: f.OrganizationID.String(),
-			Coordinates:    domainPolygonToRings(f.Coordinates),
-		})
+		item := fieldListItemJSON{
+			ID:                     f.ID.String(),
+			Name:                   f.Name,
+			Description:            f.Description,
+			CreatedAt:              f.CreatedAt.Format(time.RFC3339),
+			AreaHectares:           area,
+			OrganizationID:         f.OrganizationID.String(),
+			Coordinates:            domainPolygonToRings(f.Coordinates),
+			TileCount:              f.TileCount,
+			SeasonCount:            f.SeasonCount,
+			ObservedAnalyticsDates: f.ObservedAnalyticsDates,
+			PmtilesLayerCount:      f.PmtilesLayerCount,
+		}
+		if f.LatestObservationAt != nil {
+			s := f.LatestObservationAt.UTC().Format(time.RFC3339)
+			item.LatestObservationAt = &s
+		}
+		items = append(items, item)
 	}
 	h.writeJSON(w, http.StatusOK, map[string]any{"fields": items})
 }
 
 type fieldListItemJSON struct {
-	ID             string        `json:"id"`
-	Name           string        `json:"name"`
-	Description    string        `json:"description"`
-	CreatedAt      string        `json:"created_at"`
-	AreaHectares   *float64      `json:"area_hectares,omitempty"`
-	OrganizationID string        `json:"organization_id"`
-	Coordinates    [][][]float64 `json:"coordinates"`
+	ID                     string        `json:"id"`
+	Name                   string        `json:"name"`
+	Description            string        `json:"description"`
+	CreatedAt              string        `json:"created_at"`
+	AreaHectares           *float64      `json:"area_hectares,omitempty"`
+	OrganizationID         string        `json:"organization_id"`
+	Coordinates            [][][]float64 `json:"coordinates"`
+	TileCount              int32         `json:"tile_count"`
+	SeasonCount            int32         `json:"season_count"`
+	LatestObservationAt    *string       `json:"latest_observation_at,omitempty"`
+	ObservedAnalyticsDates int32         `json:"observed_analytics_dates"`
+	PmtilesLayerCount      int32         `json:"pmtiles_layer_count"`
 }
 
 // GET /fields/{id}
@@ -250,13 +281,8 @@ func (h *handlers) getField(w http.ResponseWriter, r *http.Request) {
 		h.writeErr(w, http.StatusBadRequest, "invalid field id")
 		return
 	}
-	field, err := h.d.FieldRepo.GetFieldByID(r.Context(), id)
-	if err != nil {
-		h.writeErr(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-	if field == nil {
-		h.writeErr(w, http.StatusNotFound, "field not found")
+	field, ok := h.ensureFieldRole(w, r, id, domain.UserRoleViewer)
+	if !ok {
 		return
 	}
 	// Optional: tile count and season count
@@ -293,37 +319,8 @@ func (h *handlers) listFieldWorkflows(w http.ResponseWriter, r *http.Request) {
 		h.writeErr(w, http.StatusServiceUnavailable, "workflow listing not configured (set TEMPORAL_ADDRESS)")
 		return
 	}
-	field, err := h.d.FieldRepo.GetFieldByID(r.Context(), id)
-	if err != nil {
-		h.writeErr(w, http.StatusInternalServerError, err.Error())
+	if _, ok := h.ensureFieldRole(w, r, id, domain.UserRoleViewer); !ok {
 		return
-	}
-	if field == nil {
-		h.writeErr(w, http.StatusNotFound, "field not found")
-		return
-	}
-	if sub := SubjectFromContext(r.Context()); sub != "" {
-		userID, perr := uuid.Parse(sub)
-		if perr != nil {
-			h.writeErr(w, http.StatusBadRequest, "invalid user")
-			return
-		}
-		orgs, oerr := h.d.OrganizationRepo.ListForUser(r.Context(), userID)
-		if oerr != nil {
-			h.writeErr(w, http.StatusInternalServerError, oerr.Error())
-			return
-		}
-		member := false
-		for _, o := range orgs {
-			if o.ID == field.OrganizationID {
-				member = true
-				break
-			}
-		}
-		if !member {
-			h.writeErr(w, http.StatusForbidden, "access denied")
-			return
-		}
 	}
 
 	runs, err := h.d.TemporalFieldWorkflows.ListFieldProcessingRuns(r.Context(), id)
@@ -353,41 +350,11 @@ func (h *handlers) startFieldWorkflow(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	field, err := h.d.FieldRepo.GetFieldByID(r.Context(), id)
-	if err != nil {
-		h.writeErr(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-	if field == nil {
-		h.writeErr(w, http.StatusNotFound, "field not found")
+	field, ok := h.ensureFieldRole(w, r, id, domain.UserRoleManager)
+	if !ok {
 		return
 	}
 
-	if sub := SubjectFromContext(r.Context()); sub != "" {
-		userID, perr := uuid.Parse(sub)
-		if perr != nil {
-			h.writeErr(w, http.StatusBadRequest, "invalid user")
-			return
-		}
-		orgs, oerr := h.d.OrganizationRepo.ListForUser(r.Context(), userID)
-		if oerr != nil {
-			h.writeErr(w, http.StatusInternalServerError, oerr.Error())
-			return
-		}
-		member := false
-		for _, o := range orgs {
-			if o.ID == field.OrganizationID {
-				member = true
-				break
-			}
-		}
-		if !member {
-			h.writeErr(w, http.StatusForbidden, "access denied")
-			return
-		}
-	}
-
-	const dateLayout = "2006-01-02"
 	fromDate, toDate, modules, err := h.resolveWorkflowDateRangeAndModules(r.Context(), field.ID, r.Body)
 	if err != nil {
 		h.writeErr(w, http.StatusBadRequest, err.Error())
@@ -432,6 +399,9 @@ func (h *handlers) getFieldProcessingDates(w http.ResponseWriter, r *http.Reques
 	fieldID, ok := h.pathUUID(r, "id")
 	if !ok {
 		h.writeErr(w, http.StatusBadRequest, "invalid field id")
+		return
+	}
+	if _, ok := h.ensureFieldRole(w, r, fieldID, domain.UserRoleViewer); !ok {
 		return
 	}
 
@@ -642,6 +612,9 @@ func (h *handlers) deleteFieldResultsByDates(w http.ResponseWriter, r *http.Requ
 		h.writeErr(w, http.StatusBadRequest, "invalid field id")
 		return
 	}
+	if _, ok := h.ensureFieldRole(w, r, fieldID, domain.UserRoleManager); !ok {
+		return
+	}
 	var req struct {
 		Dates []string `json:"dates"`
 	}
@@ -697,6 +670,10 @@ func (h *handlers) updateField(w http.ResponseWriter, r *http.Request) {
 		h.writeErr(w, http.StatusBadRequest, "invalid field id")
 		return
 	}
+	field, ok := h.ensureFieldRole(w, r, id, domain.UserRoleFarmer)
+	if !ok {
+		return
+	}
 	var req struct {
 		Name        string `json:"name"`
 		Description string `json:"description"`
@@ -713,6 +690,10 @@ func (h *handlers) updateField(w http.ResponseWriter, r *http.Request) {
 		h.writeErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	h.auditField(r.Context(), r, id, "field.updated", map[string]any{
+		"name":        map[string]string{"from": field.Name, "to": req.Name},
+		"description": map[string]string{"from": field.Description, "to": req.Description},
+	})
 	h.writeJSON(w, http.StatusOK, map[string]string{"id": id.String()})
 }
 
@@ -723,6 +704,10 @@ func (h *handlers) deleteField(w http.ResponseWriter, r *http.Request) {
 		h.writeErr(w, http.StatusBadRequest, "invalid field id")
 		return
 	}
+	if _, ok := h.ensureFieldRole(w, r, id, domain.UserRoleManager); !ok {
+		return
+	}
+	h.auditField(r.Context(), r, id, "field.deleted", map[string]string{"field_id": id.String()})
 	if err := h.d.FieldRepo.DeleteField(r.Context(), id); err != nil {
 		h.writeErr(w, http.StatusInternalServerError, err.Error())
 		return
@@ -735,6 +720,9 @@ func (h *handlers) getFieldTiles(w http.ResponseWriter, r *http.Request) {
 	id, ok := h.pathUUID(r, "id")
 	if !ok {
 		h.writeErr(w, http.StatusBadRequest, "invalid field id")
+		return
+	}
+	if _, ok := h.ensureFieldRole(w, r, id, domain.UserRoleViewer); !ok {
 		return
 	}
 	rows, err := h.d.TileRepo.ListTilesGeoJSONByFieldID(r.Context(), id)
@@ -760,6 +748,9 @@ func (h *handlers) getFieldAnalytics(w http.ResponseWriter, r *http.Request) {
 	id, ok := h.pathUUID(r, "id")
 	if !ok {
 		h.writeErr(w, http.StatusBadRequest, "invalid field id")
+		return
+	}
+	if _, ok := h.ensureFieldRole(w, r, id, domain.UserRoleViewer); !ok {
 		return
 	}
 	var dateFrom, dateTo *time.Time
@@ -895,159 +886,6 @@ type pmtilesArtifactJSON struct {
 	CreatedAt    string `json:"created_at"`
 }
 
-// MLPublisher publishes analytics jobs to the ML worker exchange.
-type MLPublisher interface {
-	PublishJSON(ctx context.Context, body []byte, replyTo, correlationID string) error
-}
-
-// POST /fields/{id}/analytics-jobs — fetch tiles + timeseries, publish ML jobs for m0/m1/m2
-func (h *handlers) postFieldAnalyticsJobs(w http.ResponseWriter, r *http.Request) {
-	fieldID, ok := h.pathUUID(r, "id")
-	if !ok {
-		h.writeErr(w, http.StatusBadRequest, "invalid field id")
-		return
-	}
-	if h.d.MLPublisher == nil {
-		h.writeErr(w, http.StatusServiceUnavailable, "ML publisher not configured")
-		return
-	}
-	tileIDs, err := h.d.TileRepo.ListTileIDsByFieldID(r.Context(), fieldID)
-	if err != nil {
-		h.writeErr(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-	if len(tileIDs) == 0 {
-		h.writeErr(w, http.StatusBadRequest, "no tiles for this field; create field first")
-		return
-	}
-
-	modules := []string{"m0", "m1", "m2"}
-	published := 0
-	tilesWithTs := 0
-	replyQueue := ""
-	if h.d.PmtilesBuild != nil {
-		replyQueue = "field.backend.replies"
-	}
-
-	slog.Info("[analytics-jobs] starting", "field_id", fieldID, "tile_count", len(tileIDs))
-
-	for _, tileID := range tileIDs {
-		ts, err := h.d.TileTsRepo.ListByTileID(r.Context(), tileID)
-		if err != nil {
-			slog.Error("list timeseries for ML job", "tile_id", tileID, "err", err)
-			continue
-		}
-		if len(ts) == 0 {
-			slog.Info("[analytics-jobs] tile has no timeseries", "tile_id", tileID)
-			continue
-		}
-		tilesWithTs++
-		tsJSON := make([]map[string]interface{}, 0, len(ts))
-		for _, row := range ts {
-			entry := map[string]interface{}{
-				"date": row.ObservationDate.Format("2006-01-02"),
-			}
-			if row.Ndvi != nil {
-				entry["ndvi"] = *row.Ndvi
-			}
-			if row.Ndmi != nil {
-				entry["ndmi"] = *row.Ndmi
-			}
-			if row.Ndre != nil {
-				entry["ndre"] = *row.Ndre
-			}
-			if row.Gndvi != nil {
-				entry["gndvi"] = *row.Gndvi
-			}
-			if row.Msavi != nil {
-				entry["msavi"] = *row.Msavi
-			}
-			if row.Vv != nil {
-				entry["vv"] = *row.Vv
-			}
-			if row.Vh != nil {
-				entry["vh"] = *row.Vh
-			}
-			if row.Nbr2 != nil {
-				entry["nbr2"] = *row.Nbr2
-			}
-			if row.BareSoilIndex != nil {
-				entry["bare_soil_index"] = *row.BareSoilIndex
-			}
-			if row.ValidPixelRatio != nil {
-				entry["valid_pixel_ratio"] = *row.ValidPixelRatio
-			}
-			if row.DryDays != nil {
-				entry["dry_days"] = *row.DryDays
-			}
-			if row.TemperatureCMean != nil {
-				entry["temperature_c_mean"] = *row.TemperatureCMean
-			}
-			if row.PrecipitationMm3d != nil {
-				entry["precipitation_mm_3d"] = *row.PrecipitationMm3d
-			}
-			if row.PrecipitationMm7d != nil {
-				entry["precipitation_mm_7d"] = *row.PrecipitationMm7d
-			}
-			if row.PrecipitationMm30d != nil {
-				entry["precipitation_mm_30d"] = *row.PrecipitationMm30d
-			}
-			tsJSON = append(tsJSON, entry)
-		}
-
-		for _, module := range modules {
-			payload := map[string]interface{}{
-				"module":     module,
-				"field_id":   fieldID.String(),
-				"tile_id":    tileID.String(),
-				"timeseries": tsJSON,
-			}
-			body, _ := json.Marshal(payload)
-			if pubErr := h.d.MLPublisher.PublishJSON(r.Context(), body, replyQueue, ""); pubErr != nil {
-				slog.Error("publish ML job", "module", module, "tile_id", tileID, "err", pubErr)
-			} else {
-				published++
-			}
-		}
-	}
-
-	slog.Info("[analytics-jobs] published ML jobs", "field_id", fieldID, "tiles_total", len(tileIDs), "tiles_with_ts", tilesWithTs, "jobs_sent", published)
-	h.writeJSON(w, http.StatusAccepted, map[string]interface{}{
-		"status":        "accepted",
-		"tiles_total":   len(tileIDs),
-		"tiles_with_ts": tilesWithTs,
-		"jobs_sent":     published,
-	})
-}
-
-// POST /fields/{id}/build-pmtiles — trigger PMTiles build for prediction layers
-func (h *handlers) postBuildPmtiles(w http.ResponseWriter, r *http.Request) {
-	fieldID, ok := h.pathUUID(r, "id")
-	if !ok {
-		h.writeErr(w, http.StatusBadRequest, "invalid field id")
-		return
-	}
-	if h.d.PmtilesBuild == nil {
-		h.writeErr(w, http.StatusServiceUnavailable, "PMTiles publisher not configured")
-		return
-	}
-	today := time.Now().UTC().Truncate(24 * time.Hour)
-	modules := []string{"degradation", "health_stress", "irrigation_water_use"}
-	published := 0
-	for _, mod := range modules {
-		if err := h.d.PmtilesBuild.PublishBuildJob(r.Context(), fieldID, "prediction", today, mod); err != nil {
-			slog.Error("publish pmtiles build", "field_id", fieldID, "module", mod, "err", err)
-		} else {
-			published++
-		}
-	}
-	slog.Info("[build-pmtiles] triggered", "field_id", fieldID, "jobs", published)
-	h.writeJSON(w, http.StatusAccepted, map[string]interface{}{
-		"status":    "accepted",
-		"jobs_sent": published,
-	})
-}
-
 // GET /seasons?field_id=uuid
 func (h *handlers) listSeasons(w http.ResponseWriter, r *http.Request) {
 	fieldStr := r.URL.Query().Get("field_id")
@@ -1058,6 +896,9 @@ func (h *handlers) listSeasons(w http.ResponseWriter, r *http.Request) {
 	fieldID, err := uuid.Parse(fieldStr)
 	if err != nil {
 		h.writeErr(w, http.StatusBadRequest, "invalid field_id")
+		return
+	}
+	if _, ok := h.ensureFieldRole(w, r, fieldID, domain.UserRoleViewer); !ok {
 		return
 	}
 	list, err := h.d.SeasonRepo.ListSeasonsByFieldID(r.Context(), fieldID)
@@ -1093,6 +934,9 @@ func (h *handlers) getSeason(w http.ResponseWriter, r *http.Request) {
 	}
 	if s == nil {
 		h.writeErr(w, http.StatusNotFound, "season not found")
+		return
+	}
+	if _, ok := h.ensureFieldRole(w, r, s.FieldID, domain.UserRoleViewer); !ok {
 		return
 	}
 	h.writeJSON(w, http.StatusOK, seasonJSON{
@@ -1136,6 +980,9 @@ func (h *handlers) createSeason(w http.ResponseWriter, r *http.Request) {
 		h.writeErr(w, http.StatusBadRequest, "invalid field_id")
 		return
 	}
+	if _, ok := h.ensureFieldRole(w, r, fieldID, domain.UserRoleFarmer); !ok {
+		return
+	}
 	startDate, err := time.Parse("2006-01-02", req.StartDate)
 	if err != nil {
 		h.writeErr(w, http.StatusBadRequest, "invalid start_date")
@@ -1151,6 +998,13 @@ func (h *handlers) createSeason(w http.ResponseWriter, r *http.Request) {
 		h.writeErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	h.auditField(r.Context(), r, fieldID, "season.created", map[string]any{
+		"season_id": id.String(),
+		"name":      req.Name,
+		"start":     req.StartDate,
+		"end":       req.EndDate,
+		"is_auto":   req.IsAuto,
+	})
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
 	_ = json.NewEncoder(w).Encode(map[string]string{"id": id.String()})
@@ -1161,6 +1015,18 @@ func (h *handlers) updateSeason(w http.ResponseWriter, r *http.Request) {
 	id, ok := h.pathUUID(r, "id")
 	if !ok {
 		h.writeErr(w, http.StatusBadRequest, "invalid season id")
+		return
+	}
+	prev, err := h.d.SeasonRepo.GetSeasonByID(r.Context(), id)
+	if err != nil {
+		h.writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if prev == nil {
+		h.writeErr(w, http.StatusNotFound, "season not found")
+		return
+	}
+	if _, ok := h.ensureFieldRole(w, r, prev.FieldID, domain.UserRoleFarmer); !ok {
 		return
 	}
 	var req struct {
@@ -1191,6 +1057,16 @@ func (h *handlers) updateSeason(w http.ResponseWriter, r *http.Request) {
 		h.writeErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	h.auditField(r.Context(), r, prev.FieldID, "season.updated", map[string]any{
+		"season_id": id.String(),
+		"before": map[string]any{
+			"name": prev.Name, "start": prev.StartDate.Format("2006-01-02"),
+			"end": prev.EndDate.Format("2006-01-02"), "is_auto": prev.IsAuto,
+		},
+		"after": map[string]any{
+			"name": req.Name, "start": req.StartDate, "end": req.EndDate, "is_auto": req.IsAuto,
+		},
+	})
 	h.writeJSON(w, http.StatusOK, map[string]string{"id": id.String()})
 }
 
@@ -1201,6 +1077,21 @@ func (h *handlers) deleteSeason(w http.ResponseWriter, r *http.Request) {
 		h.writeErr(w, http.StatusBadRequest, "invalid season id")
 		return
 	}
+	prev, err := h.d.SeasonRepo.GetSeasonByID(r.Context(), id)
+	if err != nil {
+		h.writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if prev == nil {
+		h.writeErr(w, http.StatusNotFound, "season not found")
+		return
+	}
+	if _, ok := h.ensureFieldRole(w, r, prev.FieldID, domain.UserRoleFarmer); !ok {
+		return
+	}
+	h.auditField(r.Context(), r, prev.FieldID, "season.deleted", map[string]any{
+		"season_id": id.String(), "name": prev.Name,
+	})
 	if err := h.d.SeasonRepo.DeleteSeason(r.Context(), id); err != nil {
 		h.writeErr(w, http.StatusInternalServerError, err.Error())
 		return
@@ -1213,6 +1104,14 @@ func (h *handlers) getTileMetrics(w http.ResponseWriter, r *http.Request) {
 	id, ok := h.pathUUID(r, "id")
 	if !ok {
 		h.writeErr(w, http.StatusBadRequest, "invalid tile id")
+		return
+	}
+	fieldID, err := h.d.TileRepo.GetFieldIDByTileID(r.Context(), id)
+	if err != nil {
+		h.writeErr(w, http.StatusNotFound, "tile not found")
+		return
+	}
+	if _, ok := h.ensureFieldRole(w, r, fieldID, domain.UserRoleViewer); !ok {
 		return
 	}
 	if h.d.TileMetricsReader == nil {
@@ -1329,6 +1228,9 @@ func (h *handlers) createOrganization(w http.ResponseWriter, r *http.Request) {
 		h.writeErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	if err := h.d.OrganizationRepo.UpsertMember(r.Context(), org.ID, createdBy, domain.UserRoleAdmin); err != nil {
+		slog.Warn("upsert org creator as admin member", "org_id", org.ID, "err", err)
+	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
 	_ = json.NewEncoder(w).Encode(map[string]string{"id": org.ID.String()})
@@ -1339,6 +1241,9 @@ func (h *handlers) inviteToOrganization(w http.ResponseWriter, r *http.Request) 
 	orgID, ok := h.pathUUID(r, "id")
 	if !ok {
 		h.writeErr(w, http.StatusBadRequest, "invalid organization id")
+		return
+	}
+	if !h.ensureOrgRole(w, r, orgID, domain.UserRoleManager) {
 		return
 	}
 	var req struct {
@@ -1378,7 +1283,7 @@ func (h *handlers) inviteToOrganization(w http.ResponseWriter, r *http.Request) 
 		h.writeErr(w, http.StatusNotFound, "user not found with this email")
 		return
 	}
-	if err := h.d.OrganizationRepo.AddMember(r.Context(), orgID, user.ID, role); err != nil {
+	if err := h.d.OrganizationRepo.UpsertMember(r.Context(), orgID, user.ID, role); err != nil {
 		h.writeErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
@@ -1389,37 +1294,10 @@ func (h *handlers) inviteToOrganization(w http.ResponseWriter, r *http.Request) 
 	})
 }
 
-// --- Create field (unchanged) ---
-
+// createFieldRequest is used by createField in handlers_product.go.
 type createFieldRequest struct {
 	Name         string        `json:"name"`
 	Description  string        `json:"description"`
 	Coordinates  [][][]float64 `json:"coordinates"`
 	Organization string        `json:"organization_id"`
-}
-
-func handleCreateField(fieldUC *fieldusecase.FieldUsecase) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-			return
-		}
-		var req createFieldRequest
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
-			return
-		}
-		var orgID uuid.UUID
-		if req.Organization != "" {
-			orgID, _ = uuid.Parse(req.Organization)
-		}
-		dto, err := fieldUC.CreateField(r.Context(), orgID, req.Name, req.Description, req.Coordinates)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusCreated)
-		_ = json.NewEncoder(w).Encode(map[string]string{"id": dto.ID.String()})
-	}
 }

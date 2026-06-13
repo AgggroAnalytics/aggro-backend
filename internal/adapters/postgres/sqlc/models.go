@@ -430,6 +430,15 @@ type FieldAnalyticsTimeseries struct {
 	CreatedAt                          pgtype.Timestamptz `json:"created_at"`
 }
 
+type FieldAuditLog struct {
+	ID          uuid.UUID          `json:"id"`
+	FieldID     uuid.UUID          `json:"field_id"`
+	ActorUserID uuid.UUID          `json:"actor_user_id"`
+	Action      string             `json:"action"`
+	Payload     []byte             `json:"payload"`
+	CreatedAt   pgtype.Timestamptz `json:"created_at"`
+}
+
 type FieldPrediction struct {
 	ID             uuid.UUID          `json:"id"`
 	FieldID        uuid.UUID          `json:"field_id"`
@@ -479,10 +488,11 @@ type FieldPredictionsIrrigationWaterUse struct {
 }
 
 type Organization struct {
-	ID        uuid.UUID          `json:"id"`
-	Name      string             `json:"name"`
-	CreatedAt pgtype.Timestamptz `json:"created_at"`
-	CreatedBy uuid.UUID          `json:"created_by"`
+	ID            uuid.UUID          `json:"id"`
+	Name          string             `json:"name"`
+	CreatedAt     pgtype.Timestamptz `json:"created_at"`
+	CreatedBy     uuid.UUID          `json:"created_by"`
+	SeasonTargets []byte             `json:"season_targets"`
 }
 
 type OrganizationMember struct {
@@ -595,4 +605,15 @@ type User struct {
 	FirstName string    `json:"first_name"`
 	LastName  string    `json:"last_name"`
 	Email     string    `json:"email"`
+}
+
+type UserPreference struct {
+	UserID            uuid.UUID          `json:"user_id"`
+	Locale            string             `json:"locale"`
+	Timezone          string             `json:"timezone"`
+	AvatarUrl         pgtype.Text        `json:"avatar_url"`
+	UnitsSystem       string             `json:"units_system"`
+	DateFormat        string             `json:"date_format"`
+	FieldsDefaultYear pgtype.Int4        `json:"fields_default_year"`
+	UpdatedAt         pgtype.Timestamptz `json:"updated_at"`
 }

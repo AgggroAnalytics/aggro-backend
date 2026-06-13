@@ -78,3 +78,7 @@ func (r *TilesPostgres) ListTilesGeoJSONByFieldID(ctx context.Context, fieldID u
 	}
 	return out, nil
 }
+
+func (r *TilesPostgres) GetFieldIDByTileID(ctx context.Context, tileID uuid.UUID) (uuid.UUID, error) {
+	return r.queries(ctx).GetTileFieldID(ctx, tileID)
+}

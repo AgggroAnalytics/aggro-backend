@@ -16,6 +16,7 @@ tags:
   - name: Fields
   - name: Seasons
   - name: Organizations
+  - name: Users
   - name: Tiles
   - name: Storage
 
@@ -198,6 +199,97 @@ paths:
         '503': { description: Temporal not configured on API }
         '502': { description: Temporal start error }
 
+  /fields/{id}/workflows/{runId}/failure:
+    get:
+      tags: [Fields]
+      summary: Human-readable workflow failure message (Temporal close history)
+      parameters:
+        - $ref: '#/components/parameters/FieldId'
+        - name: runId
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message: { type: string }
+                  detail: { type: string }
+
+  /fields/{id}/workflows/{runId}/terminate:
+    post:
+      tags: [Fields]
+      summary: Terminate a workflow run (manager+)
+      parameters:
+        - $ref: '#/components/parameters/FieldId'
+        - name: runId
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, example: terminated }
+
+  /fields/{id}/audit:
+    get:
+      tags: [Fields]
+      summary: Field change audit log
+      parameters:
+        - $ref: '#/components/parameters/FieldId'
+        - name: limit
+          in: query
+          schema: { type: integer, maximum: 500 }
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  field_id: { type: string, format: uuid }
+                  entries:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id: { type: string, format: uuid }
+                        actor_user_id: { type: string, format: uuid }
+                        action: { type: string }
+                        payload: { type: object }
+                        created_at: { type: string, format: date-time }
+
+  /fields/{id}/export:
+    get:
+      tags: [Fields]
+      summary: Export analytics CSV or tiles GeoJSON
+      parameters:
+        - $ref: '#/components/parameters/FieldId'
+        - name: format
+          in: query
+          schema: { type: string, enum: [csv, geojson] }
+        - name: kind
+          in: query
+          schema: { type: string, enum: [analytics, tiles] }
+        - name: date_from
+          in: query
+          description: Inclusive start date (YYYY-MM-DD) for analytics CSV only
+          schema: { type: string, format: date }
+        - name: date_to
+          in: query
+          description: Inclusive end date (YYYY-MM-DD) for analytics CSV only
+          schema: { type: string, format: date }
+      responses:
+        '200':
+          description: File download
+
   /fields/{id}/processing-dates:
     get:
       tags: [Fields]
@@ -255,41 +347,6 @@ paths:
                   dates:
                     type: array
                     items: { type: string, format: date }
-
-  /fields/{id}/analytics-jobs:
-    post:
-      tags: [Fields]
-      summary: Publish ML jobs to RabbitMQ (legacy path)
-      parameters:
-        - $ref: '#/components/parameters/FieldId'
-      responses:
-        '202':
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  status: { type: string, example: accepted }
-                  tiles_total: { type: integer }
-                  tiles_with_ts: { type: integer }
-                  jobs_sent: { type: integer }
-        '503': { description: ML publisher not configured }
-
-  /fields/{id}/build-pmtiles:
-    post:
-      tags: [Fields]
-      summary: Trigger PMTiles build jobs (RabbitMQ)
-      parameters:
-        - $ref: '#/components/parameters/FieldId'
-      responses:
-        '202':
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  status: { type: string }
-                  jobs_sent: { type: integer }
 
   /seasons:
     get:
@@ -432,6 +489,219 @@ paths:
                   user_id: { type: string }
                   role: { type: string }
 
+  /organizations/{id}/members:
+    get:
+      tags: [Organizations]
+      summary: List organization members
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  members:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        user_id: { type: string, format: uuid }
+                        username: { type: string }
+                        email: { type: string }
+                        first_name: { type: string }
+                        last_name: { type: string }
+                        role: { type: string }
+                        member_since: { type: string, format: date-time }
+
+  /organizations/{id}/members/{userId}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+      - name: userId
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    patch:
+      tags: [Organizations]
+      summary: Change member role (manager+)
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [role]
+              properties:
+                role: { type: string, enum: [admin, manager, farmer, viewer] }
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string }
+    delete:
+      tags: [Organizations]
+      summary: Remove member (manager+)
+      responses:
+        '204': { description: No content }
+
+  /organizations/{id}/field-workflow-runs:
+    get:
+      tags: [Organizations]
+      summary: Recent workflow runs for all fields in organization
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  organization_id: { type: string, format: uuid }
+                  runs:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        field_id: { type: string }
+                        field_name: { type: string }
+                        run: { $ref: '#/components/schemas/FieldWorkflowRun' }
+
+  /organizations/{id}/dashboard:
+    get:
+      tags: [Organizations]
+      summary: Organization home dashboard (stats, NDVI weekly, audit snippet, workflows)
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        '503': { description: Dashboard SQL not configured }
+
+  /organizations/{id}/audit-log:
+    get:
+      tags: [Organizations]
+      summary: Field audit entries for all fields in the organization
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 500 }
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  organization_id: { type: string, format: uuid }
+                  entries:
+                    type: array
+                    items: { type: object, additionalProperties: true }
+
+  /organizations/{id}/season-targets:
+    patch:
+      tags: [Organizations]
+      summary: Update JSON season KPI targets for the organization (manager+)
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
+              description: e.g. ndvi_target, health_score_target, notes
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string }
+
+  /organizations/{id}/weather:
+    get:
+      tags: [Organizations]
+      summary: Weather forecast (Open-Meteo) at centroid of org fields
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        '404': { description: No fields / no centroid }
+
+  /users/me:
+    get:
+      tags: [Users]
+      summary: Current user profile (JWT + saved preferences)
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+
+  /users/me/preferences:
+    patch:
+      tags: [Users]
+      summary: Update UI preferences
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                locale: { type: string }
+                timezone: { type: string }
+                avatar_url: { type: string }
+                units_system: { type: string, enum: [metric, imperial] }
+                date_format: { type: string, description: e.g. dmy, mdy, iso }
+                fields_default_year: { type: integer, nullable: true }
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string }
+
   /tiles/{id}/metrics:
     get:
       tags: [Tiles]
@@ -524,6 +794,15 @@ components:
         created_at: { type: string, format: date-time }
         area_hectares: { type: number, nullable: true }
         organization_id: { type: string, format: uuid }
+        tile_count: { type: integer, description: Number of geometry tiles for this field }
+        season_count: { type: integer }
+        latest_observation_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: Latest satellite/observation timestamp across tile timeseries
+        observed_analytics_dates: { type: integer, description: Distinct dates with observed field-level analytics }
+        pmtiles_layer_count: { type: integer, description: Stored PMTiles map layers for this field }
         coordinates:
           type: array
           description: Polygon rings [lon, lat], number[][][]
@@ -615,6 +894,8 @@ components:
           description: When parallel activities run (e.g. ML + observed PMTiles)
         started_at: { type: string, format: date-time, nullable: true }
         closed_at: { type: string, format: date-time, nullable: true }
+        duration_seconds: { type: integer, format: int64, nullable: true }
+        failure_message: { type: string, nullable: true, description: Set when status is FAILED }
 
     FieldAnalyticsResponse:
       type: object
